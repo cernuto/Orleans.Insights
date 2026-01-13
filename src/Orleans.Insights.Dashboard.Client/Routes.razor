@@ -3,8 +3,7 @@
     Authentication is optional - configure in host application if needed.
 *@
 
-<Router AppAssembly="@typeof(Routes).Assembly"
-        AdditionalAssemblies="new[] { typeof(Health).Assembly }">
+<Router AppAssembly="@typeof(Routes).Assembly">
     <Found Context="routeData">
         <RouteView RouteData="@routeData" DefaultLayout="@typeof(Layout.MainLayout)" />
         <FocusOnNavigate RouteData="@routeData" Selector="h1" />

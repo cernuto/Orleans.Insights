@@ -25,20 +25,11 @@ public sealed record OverviewPageData
     /// <summary>Total memory used across all silos (MB).</summary>
     [Id(3)] public long MemoryUsedMb { get; init; }
 
-    /// <summary>Number of healthy endpoints.</summary>
-    [Id(4)] public int HealthyEndpoints { get; init; }
-
-    /// <summary>Number of unhealthy endpoints.</summary>
-    [Id(5)] public int UnhealthyEndpoints { get; init; }
-
     /// <summary>When this data was generated.</summary>
-    [Id(6)] public DateTime Timestamp { get; init; }
+    [Id(4)] public DateTime Timestamp { get; init; }
 
     /// <summary>List of silos for the cluster status table.</summary>
-    [Id(7)] public required List<SiloSummary> Silos { get; init; }
-
-    /// <summary>List of health endpoints for the health status table.</summary>
-    [Id(8)] public required List<HealthEndpointSummary> HealthEndpoints { get; init; }
+    [Id(5)] public required List<SiloSummary> Silos { get; init; }
 }
 
 /// <summary>
@@ -53,17 +44,6 @@ public sealed record SiloSummary
     [Id(3)] public int ActivationCount { get; init; }
     [Id(4)] public double CpuUsage { get; init; }
     [Id(5)] public long MemoryUsageMb { get; init; }
-}
-
-/// <summary>
-/// Summary of a health endpoint for Overview page display.
-/// </summary>
-[GenerateSerializer, Immutable]
-public sealed record HealthEndpointSummary
-{
-    [Id(0)] public required string Name { get; init; }
-    [Id(1)] public required string OverallStatus { get; init; }
-    [Id(2)] public int CheckCount { get; init; }
 }
 
 /// <summary>
@@ -148,28 +128,6 @@ public sealed record OrleansOTelSummary
     // Miscellaneous grain metrics
     [Id(17)] public long GrainCount { get; init; }
     [Id(18)] public long SystemTargets { get; init; }
-}
-
-/// <summary>
-/// Data for the Health page - all silo health reports.
-/// </summary>
-[GenerateSerializer, Immutable]
-public sealed record HealthPageData
-{
-    /// <summary>Health reports from all silos.</summary>
-    [Id(0)] public required List<SiloHealthReport> SiloReports { get; init; }
-
-    /// <summary>When this data was generated.</summary>
-    [Id(1)] public DateTime Timestamp { get; init; }
-
-    /// <summary>Total healthy check count across all silos.</summary>
-    [Id(2)] public int HealthyCount { get; init; }
-
-    /// <summary>Total degraded check count across all silos.</summary>
-    [Id(3)] public int DegradedCount { get; init; }
-
-    /// <summary>Total unhealthy check count across all silos.</summary>
-    [Id(4)] public int UnhealthyCount { get; init; }
 }
 
 /// <summary>

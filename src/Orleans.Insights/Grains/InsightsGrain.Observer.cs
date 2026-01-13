@@ -27,7 +27,6 @@ public partial class InsightsGrain
     /// Tracks the last broadcast data for change detection.
     /// Only broadcast when data actually changes.
     /// </summary>
-    private HealthPageData? _lastBroadcastHealth;
     private OverviewPageData? _lastBroadcastOverview;
     private OrleansPageData? _lastBroadcastOrleans;
     private InsightsPageData? _lastBroadcastInsights;
@@ -90,24 +89,16 @@ public partial class InsightsGrain
         try
         {
             // Get current page data (uses caching internally)
-            var healthTask = GetHealthPageData();
             var overviewTask = GetOverviewPageData();
             var orleansTask = GetOrleansPageData();
 
-            await Task.WhenAll(healthTask, overviewTask, orleansTask);
+            await Task.WhenAll(overviewTask, orleansTask);
 
-            var health = await healthTask;
             var overview = await overviewTask;
             var orleans = await orleansTask;
 
             // Broadcast only if data changed
             // [OneWay] calls are fire-and-forget - use discard to suppress warnings
-            if (HasHealthDataChanged(health))
-            {
-                _lastBroadcastHealth = health;
-                _ = _broadcastGrain.BroadcastHealthData(health);
-            }
-
             if (HasOverviewDataChanged(overview))
             {
                 _lastBroadcastOverview = overview;
@@ -145,58 +136,8 @@ public partial class InsightsGrain
     #region Change Detection
 
     /// <summary>
-    /// Detects if health data has meaningfully changed.
-    /// Checks counts, silo statuses, and individual check statuses.
-    /// </summary>
-    private bool HasHealthDataChanged(HealthPageData current)
-    {
-        if (_lastBroadcastHealth is null) return true;
-
-        var last = _lastBroadcastHealth;
-
-        // Check aggregate counts
-        if (last.HealthyCount != current.HealthyCount
-            || last.DegradedCount != current.DegradedCount
-            || last.UnhealthyCount != current.UnhealthyCount
-            || last.SiloReports.Count != current.SiloReports.Count)
-            return true;
-
-        // Check each silo's status and last reported time
-        for (int i = 0; i < current.SiloReports.Count; i++)
-        {
-            var lastSilo = last.SiloReports.FirstOrDefault(s => s.SiloId == current.SiloReports[i].SiloId);
-            if (lastSilo is null)
-                return true;
-
-            var currentSilo = current.SiloReports[i];
-
-            // Check if overall status changed
-            if (lastSilo.OverallStatus != currentSilo.OverallStatus)
-                return true;
-
-            // Check if last reported time changed (indicates new health check run)
-            if (lastSilo.LastReported != currentSilo.LastReported)
-                return true;
-
-            // Check if check count changed
-            if (lastSilo.Checks.Count != currentSilo.Checks.Count)
-                return true;
-
-            // Check if any individual check status changed
-            foreach (var currentCheck in currentSilo.Checks)
-            {
-                var lastCheck = lastSilo.Checks.FirstOrDefault(c => c.Name == currentCheck.Name);
-                if (lastCheck is null || lastCheck.Status != currentCheck.Status)
-                    return true;
-            }
-        }
-
-        return false;
-    }
-
-    /// <summary>
     /// Detects if overview data has meaningfully changed.
-    /// Checks cluster metrics, silo statuses, and health endpoints.
+    /// Checks cluster metrics and silo statuses.
     /// </summary>
     private bool HasOverviewDataChanged(OverviewPageData current)
     {
@@ -208,14 +149,11 @@ public partial class InsightsGrain
         if (last.SiloCount != current.SiloCount
             || last.TotalGrains != current.TotalGrains
             || Math.Abs(last.CpuPercent - current.CpuPercent) > 1.0
-            || last.MemoryUsedMb != current.MemoryUsedMb
-            || last.HealthyEndpoints != current.HealthyEndpoints
-            || last.UnhealthyEndpoints != current.UnhealthyEndpoints)
+            || last.MemoryUsedMb != current.MemoryUsedMb)
             return true;
 
         // Check list counts
-        if (last.Silos.Count != current.Silos.Count
-            || last.HealthEndpoints.Count != current.HealthEndpoints.Count)
+        if (last.Silos.Count != current.Silos.Count)
             return true;
 
         // Check silo changes
@@ -229,18 +167,6 @@ public partial class InsightsGrain
                 || lastSilo.ActivationCount != currentSilo.ActivationCount
                 || Math.Abs(lastSilo.CpuUsage - currentSilo.CpuUsage) > 1.0
                 || lastSilo.MemoryUsageMb != currentSilo.MemoryUsageMb)
-                return true;
-        }
-
-        // Check health endpoint changes
-        foreach (var currentEndpoint in current.HealthEndpoints)
-        {
-            var lastEndpoint = last.HealthEndpoints.FirstOrDefault(e => e.Name == currentEndpoint.Name);
-            if (lastEndpoint is null)
-                return true;
-
-            if (lastEndpoint.OverallStatus != currentEndpoint.OverallStatus
-                || lastEndpoint.CheckCount != currentEndpoint.CheckCount)
                 return true;
         }
 

@@ -13,7 +13,6 @@ namespace Orleans.Insights.Dashboard.Client.Models;
     PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
     PropertyNameCaseInsensitive = true,
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
-[JsonSerializable(typeof(HealthPageViewModel))]
 [JsonSerializable(typeof(OverviewPageViewModel))]
 [JsonSerializable(typeof(OrleansPageViewModel))]
 [JsonSerializable(typeof(InsightsPageViewModel))]
@@ -47,42 +46,6 @@ public static class JsonOptions
     }
 }
 
-#region Health Page
-
-public record HealthPageViewModel
-{
-    public int HealthyCount { get; init; }
-    public int DegradedCount { get; init; }
-    public int UnhealthyCount { get; init; }
-    public List<SiloHealthReportViewModel> SiloReports { get; init; } = [];
-    public DateTime Timestamp { get; init; }
-
-    public static HealthPageViewModel FromJson(JsonElement json)
-        => json.Deserialize<HealthPageViewModel>(JsonOptions.Default) ?? Empty;
-
-    public static HealthPageViewModel Empty => new() { SiloReports = [], Timestamp = DateTime.UtcNow };
-}
-
-public record SiloHealthReportViewModel
-{
-    public string SiloId { get; init; } = "";
-    public string HostName { get; init; } = "";
-    public string OverallStatus { get; init; } = "Healthy";
-    public List<HealthCheckViewModel> Checks { get; init; } = [];
-    public DateTime LastReported { get; init; }
-}
-
-public record HealthCheckViewModel
-{
-    public string Name { get; init; } = "";
-    public string Status { get; init; } = "Healthy";
-    public string? Description { get; init; }
-    public string? Tag { get; init; }
-    public double? DurationMs { get; init; }
-}
-
-#endregion
-
 #region Overview Page
 
 public record OverviewPageViewModel
@@ -91,11 +54,8 @@ public record OverviewPageViewModel
     public int TotalGrains { get; init; }
     public double CpuPercent { get; init; }
     public long MemoryUsedMb { get; init; }
-    public int HealthyEndpoints { get; init; }
-    public int UnhealthyEndpoints { get; init; }
     public DateTime Timestamp { get; init; }
     public List<SiloSummaryViewModel> Silos { get; init; } = [];
-    public List<HealthEndpointSummaryViewModel> HealthEndpoints { get; init; } = [];
 
     public static OverviewPageViewModel FromJson(JsonElement json)
         => json.Deserialize<OverviewPageViewModel>(JsonOptions.Default) ?? Empty;
@@ -103,7 +63,6 @@ public record OverviewPageViewModel
     public static OverviewPageViewModel Empty => new()
     {
         Silos = [],
-        HealthEndpoints = [],
         Timestamp = DateTime.UtcNow
     };
 }
@@ -116,13 +75,6 @@ public record SiloSummaryViewModel
     public int ActivationCount { get; init; }
     public double CpuUsage { get; init; }
     public long MemoryUsageMb { get; init; }
-}
-
-public record HealthEndpointSummaryViewModel
-{
-    public string Name { get; init; } = "";
-    public string OverallStatus { get; init; } = "";
-    public int CheckCount { get; init; }
 }
 
 #endregion

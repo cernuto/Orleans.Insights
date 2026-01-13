@@ -85,11 +85,67 @@ SignalR Hub
 Blazor WASM Dashboard
 ```
 
+## Projects
+
+### Orleans.Insights
+
+Core library that provides metrics collection and storage. Install this on every silo in your cluster.
+
+**Key Components:**
+- **GrainMethodProfiler** - Intercepts grain method calls to collect latency, throughput, and error metrics
+- **SiloMetricsCollector** - Collects silo-level metrics (CPU, memory, activation counts) using `Process` APIs and `IManagementGrain.GetDetailedGrainStatistics()`
+- **InsightsGrain** - Singleton grain that aggregates metrics from all silos and stores them in DuckDB
+- **InsightsDatabase** - DuckDB wrapper for time-series storage with automatic retention cleanup
+- **GrainTypeNameCache** - Caches grain type names using `Type.FullName` for consistent identification
+
+**Metrics Collected:**
+- Per-method: call count, latency (avg/min/max), error count, requests per second
+- Per-silo: CPU usage, memory usage, activation counts per grain type
+- Per-grain-type: total activations across cluster, aggregated method metrics
+
+### Orleans.Insights.Dashboard
+
+Server-side dashboard components. Install this on the host that serves the dashboard UI.
+
+**Key Components:**
+- **DashboardHub** - SignalR hub for real-time push updates to connected clients
+- **DashboardBroadcastGrain** - StatelessWorker that broadcasts page data to SignalR groups
+- **DashboardExtensions** - Extension methods for `IServiceCollection` and `IEndpointRouteBuilder` configuration
+
+**Responsibilities:**
+- Serves the Blazor WebAssembly client static files
+- Manages SignalR connections and group subscriptions (one group per dashboard page)
+- Routes page data from InsightsGrain to connected dashboard clients
+
+### Orleans.Insights.Dashboard.Client
+
+Blazor WebAssembly client application for the dashboard UI.
+
+**Key Components:**
+- **DashboardService** - SignalR client that subscribes to page-specific data streams
+- **Dashboard Pages:**
+  - **Overview** - Cluster summary with silo status cards
+  - **Orleans** - Grain type list with method profiling charts
+  - **Insights** - Slowest/busiest grains, trend analysis
+
+**UI Features:**
+- Real-time updates via SignalR (no polling)
+- Interactive charts using a lightweight charting library
+- Responsive grid layout for silo and grain cards
+
+### Orleans.Insights.Sample
+
+Sample application demonstrating Orleans.Insights integration.
+
+**Contents:**
+- Sample grains: `CounterGrain`, `TemperatureSensorGrain`, `OrderProcessorGrain`
+- `GrainActivitySimulator` - Background service that generates grain traffic for demo purposes
+- Serilog configuration for file-based logging
+
 ## Dashboard Pages
 
 - **Overview** - High-level cluster summary with silo status
 - **Orleans** - Detailed grain monitoring with method profiling
-- **Health** - Health check status across silos
 - **Insights** - Trend analysis and anomaly detection
 
 ## Configuration Options

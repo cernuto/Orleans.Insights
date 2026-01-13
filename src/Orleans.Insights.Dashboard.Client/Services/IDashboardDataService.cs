@@ -48,7 +48,7 @@ public interface IDashboardDataService : IAsyncDisposable
     /// Subscribe to updates for a specific page.
     /// Called when a page component initializes.
     /// </summary>
-    /// <param name="pageName">Page name: health, overview, orleans, insights</param>
+    /// <param name="pageName">Page name: overview, orleans, insights</param>
     Task SubscribeToPage(string pageName);
 
     /// <summary>
@@ -62,9 +62,6 @@ public interface IDashboardDataService : IAsyncDisposable
 
     #region Data Events - Using JsonElement for cross-platform compatibility
 
-    /// <summary>Raised when Health page data is received.</summary>
-    event Action<JsonElement>? OnHealthDataReceived;
-
     /// <summary>Raised when Overview page data is received.</summary>
     event Action<JsonElement>? OnOverviewDataReceived;
 
@@ -77,9 +74,6 @@ public interface IDashboardDataService : IAsyncDisposable
     #endregion
 
     #region Data Fetch (for initial load and on-demand refresh)
-
-    /// <summary>Fetches Health page data immediately.</summary>
-    Task<JsonElement> GetHealthPageDataAsync();
 
     /// <summary>Fetches Overview page data immediately.</summary>
     Task<JsonElement> GetOverviewPageDataAsync();
@@ -108,7 +102,6 @@ public interface IDashboardDataService : IAsyncDisposable
 /// </summary>
 public static class ClientDashboardPages
 {
-    public const string Health = "health";
     public const string Overview = "overview";
     public const string Orleans = "orleans";
     public const string Insights = "insights";

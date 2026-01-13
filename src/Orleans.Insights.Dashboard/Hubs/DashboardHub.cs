@@ -79,7 +79,7 @@ public sealed class DashboardHub : Hub
     /// <summary>
     /// Subscribe to updates for a specific page.
     /// </summary>
-    /// <param name="pageName">Page name (health, overview, orleans, insights)</param>
+    /// <param name="pageName">Page name (overview, orleans, insights)</param>
     public async Task SubscribeToPage(string pageName)
     {
         var normalizedPage = pageName.ToLowerInvariant();
@@ -114,14 +114,6 @@ public sealed class DashboardHub : Hub
     #endregion
 
     #region Data Fetch Methods
-
-    /// <summary>Get Health page data immediately.</summary>
-    public async Task<JsonElement> GetHealthPageData()
-    {
-        var grain = _clusterClient.GetGrain<IInsightsGrain>(IInsightsGrain.SingletonKey);
-        var data = await grain.GetHealthPageData();
-        return JsonSerializer.SerializeToElement(data, JsonOptions);
-    }
 
     /// <summary>Get Overview page data immediately.</summary>
     public async Task<JsonElement> GetOverviewPageData()
@@ -186,7 +178,6 @@ public sealed class DashboardHub : Hub
 
     private async Task<JsonElement> GetPageDataAsync(string pageName) => pageName switch
     {
-        DashboardPages.Health => await GetHealthPageData(),
         DashboardPages.Overview => await GetOverviewPageData(),
         DashboardPages.Orleans => await GetOrleansPageData(),
         DashboardPages.Insights => await GetInsightsPageData(),
@@ -239,7 +230,6 @@ public sealed class DashboardHub : Hub
 /// </summary>
 public static class DashboardPages
 {
-    public const string Health = "health";
     public const string Overview = "overview";
     public const string Orleans = "orleans";
     public const string Insights = "insights";

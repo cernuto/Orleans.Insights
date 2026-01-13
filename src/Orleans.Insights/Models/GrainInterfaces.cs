@@ -218,38 +218,6 @@ public interface IInsightsDatabaseGrain : IGrainWithStringKey
 }
 
 /// <summary>
-/// Interface for ingesting health reports from silos.
-/// Each silo periodically reports its health check results to this grain.
-/// Uses fire-and-forget semantics for minimal latency impact.
-/// </summary>
-public interface IHealthIngestGrain : IGrainWithStringKey
-{
-    /// <summary>
-    /// Ingests a health report from a silo.
-    /// Called by HealthReportingService on each silo.
-    /// Uses [OneWay] for fire-and-forget semantics.
-    /// </summary>
-    /// <param name="report">The health report from the silo</param>
-    [OneWay]
-    Task IngestHealthReport(HealthReportData report);
-}
-
-/// <summary>
-/// Interface for querying cluster-wide health status.
-/// Aggregates health reports from all silos for dashboard display.
-/// </summary>
-public interface IHealthQueryGrain : IGrainWithStringKey
-{
-    /// <summary>
-    /// Gets aggregated health status from all silos.
-    /// Returns health reports from all silos that have reported within the stale threshold.
-    /// Uses [AlwaysInterleave] for concurrent reads.
-    /// </summary>
-    [AlwaysInterleave]
-    Task<List<SiloHealthReport>> GetClusterHealth();
-}
-
-/// <summary>
 /// Interface for page-specific dashboard queries.
 /// Each method returns exactly the data needed for a specific dashboard page,
 /// enabling efficient data fetching in horizontally scaled deployments.
@@ -268,12 +236,6 @@ public interface IDashboardPageQueryGrain : IGrainWithStringKey
     /// </summary>
     [AlwaysInterleave]
     Task<OrleansPageData> GetOrleansPageData();
-
-    /// <summary>
-    /// Gets data for the Health page - all silo health reports.
-    /// </summary>
-    [AlwaysInterleave]
-    Task<HealthPageData> GetHealthPageData();
 
     /// <summary>
     /// Gets data for the Insights page - anomalies, trends, rankings.
@@ -308,8 +270,7 @@ public interface IDashboardPageQueryGrain : IGrainWithStringKey
 /// - Latency trends over time
 /// - Top-N slowest grains/methods with accurate averages
 /// - Anomaly detection (current vs baseline)
-/// - Silo performance comparison and health monitoring
-/// - Cluster-wide health monitoring with horizontal scaling support
+/// - Silo performance comparison
 /// - Page-specific queries for efficient dashboard data fetching
 /// </summary>
 public interface IInsightsGrain :
@@ -318,8 +279,6 @@ public interface IInsightsGrain :
     IMethodProfileQueryGrain,
     IOrleansMetricsQueryGrain,
     IInsightsDatabaseGrain,
-    IHealthIngestGrain,
-    IHealthQueryGrain,
     IDashboardPageQueryGrain
 {
     /// <summary>
@@ -335,10 +294,6 @@ public interface IInsightsGrain :
 /// </summary>
 public interface IDashboardBroadcastGrain : IGrainWithIntegerKey
 {
-    /// <summary>Broadcast Health page data to subscribed clients.</summary>
-    [OneWay]
-    Task BroadcastHealthData(HealthPageData data);
-
     /// <summary>Broadcast Overview page data to subscribed clients.</summary>
     [OneWay]
     Task BroadcastOverviewData(OverviewPageData data);

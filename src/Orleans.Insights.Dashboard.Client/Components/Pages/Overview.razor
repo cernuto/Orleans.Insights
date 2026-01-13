@@ -15,81 +15,48 @@
 <div class="grid-4">
     <MetricCard Value="@_data.SiloCount.ToString()" Label="Active Silos" ColorClass="text-success" />
     <MetricCard Value="@_data.TotalGrains.ToString("N0")" Label="Grain Activations" />
-    <MetricCard Value="@_data.HealthyEndpoints.ToString()" Label="Healthy Endpoints"
-                ColorClass="@(_data.UnhealthyEndpoints > 0 ? "text-danger" : "text-success")" />
+    <MetricCard Value="@($"{_data.CpuPercent:F1}%")" Label="CPU Usage" />
     <MetricCard Value="@FormatMemory(_data.MemoryUsedMb)" Label="Memory Usage" />
 </div>
 
-<div class="grid-2">
-    <div class="card">
-        <div class="card-header">
-            <span class="card-title">Health Status</span>
-        </div>
-        @if (_data.HealthEndpoints.Count > 0)
-        {
-            <div class="table-responsive">
-                <table class="table">
-                    <thead>
-                        <tr>
-                            <th>Endpoint</th>
-                            <th>Status</th>
-                            <th class="text-right">Checks</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        @foreach (var endpoint in _data.HealthEndpoints)
-                        {
-                            <tr>
-                                <td>@endpoint.Name</td>
-                                <td><StatusBadge Status="@endpoint.OverallStatus" /></td>
-                                <td class="text-right text-muted">@endpoint.CheckCount</td>
-                            </tr>
-                        }
-                    </tbody>
-                </table>
-            </div>
-        }
-        else
-        {
-            <div class="empty-state">No health data</div>
-        }
+<div class="card">
+    <div class="card-header">
+        <span class="card-title">Cluster Status</span>
     </div>
-
-    <div class="card">
-        <div class="card-header">
-            <span class="card-title">Cluster Status</span>
-        </div>
-        @if (_data.Silos.Count > 0)
-        {
-            <div class="table-responsive">
-                <table class="table">
-                    <thead>
+    @if (_data.Silos.Count > 0)
+    {
+        <div class="table-responsive">
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>Silo</th>
+                        <th>Host</th>
+                        <th>Status</th>
+                        <th class="text-right">Grains</th>
+                        <th class="text-right hide-mobile">CPU</th>
+                        <th class="text-right hide-mobile">Memory</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var silo in _data.Silos)
+                    {
                         <tr>
-                            <th>Silo</th>
-                            <th>Status</th>
-                            <th class="text-right">Grains</th>
-                            <th class="text-right hide-mobile">CPU</th>
+                            <td class="font-mono">@TruncateAddress(silo.Address)</td>
+                            <td>@silo.HostName</td>
+                            <td><StatusBadge Status="@(silo.Status == "Active" ? "Healthy" : "Degraded")" /></td>
+                            <td class="text-right">@silo.ActivationCount.ToString("N0")</td>
+                            <td class="text-right hide-mobile">@silo.CpuUsage.ToString("F0")%</td>
+                            <td class="text-right hide-mobile">@FormatMemory(silo.MemoryUsageMb)</td>
                         </tr>
-                    </thead>
-                    <tbody>
-                        @foreach (var silo in _data.Silos.Take(5))
-                        {
-                            <tr>
-                                <td class="font-mono">@TruncateAddress(silo.Address)</td>
-                                <td><StatusBadge Status="@(silo.Status == "Active" ? "Healthy" : "Degraded")" /></td>
-                                <td class="text-right">@silo.ActivationCount.ToString("N0")</td>
-                                <td class="text-right hide-mobile">@silo.CpuUsage.ToString("F0")%</td>
-                            </tr>
-                        }
-                    </tbody>
-                </table>
-            </div>
-        }
-        else
-        {
-            <div class="empty-state">No cluster data</div>
-        }
-    </div>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+    else
+    {
+        <div class="empty-state">No cluster data</div>
+    }
 </div>
 
 @code {

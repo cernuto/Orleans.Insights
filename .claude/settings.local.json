@@ -8,7 +8,13 @@
       "Bash(curl:*)",
       "Bash(dir:*)",
       "Bash(tree:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(Get-Process -Name \"Orleans.Insights.Sample\" -ErrorAction SilentlyContinue)",
+      "Bash(Stop-Process -Force)",
+      "Bash(Get-Process -Name \"dotnet\")",
+      "Bash(Where-Object {$_MainWindowTitle -like \"*Orleans*\"})",
+      "Bash(Stop-Process -Force -ErrorAction SilentlyContinue)",
+      "Bash(powershell -Command \"Get-Process | Where-Object { $_.ProcessName -like ''*Orleans*'' } | Stop-Process -Force\")"
     ]
   }
 }

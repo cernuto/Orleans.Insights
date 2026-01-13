@@ -42,13 +42,6 @@ public sealed class DashboardBroadcastGrain : Grain, IDashboardBroadcastGrain
         };
     }
 
-    public Task BroadcastHealthData(HealthPageData data)
-    {
-        _logger.LogDebug("Broadcasting Health data to SignalR group");
-        var json = JsonSerializer.SerializeToElement(data, _jsonOptions);
-        return _hubContext.Clients.Group(DashboardPages.Health).SendAsync("ReceiveHealthData", json);
-    }
-
     public Task BroadcastOverviewData(OverviewPageData data)
     {
         _logger.LogDebug("Broadcasting Overview data to SignalR group");

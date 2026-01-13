@@ -169,12 +169,6 @@ public sealed class DashboardSignalRService : IDashboardDataService
     {
         if (_hubConnection is null) return;
 
-        _hubConnection.On<JsonElement>("ReceiveHealthData", data =>
-        {
-            _logger.LogDebug("Received Health data");
-            OnHealthDataReceived?.Invoke(data);
-        });
-
         _hubConnection.On<JsonElement>("ReceiveOverviewData", data =>
         {
             _logger.LogDebug("Received Overview data");
@@ -249,7 +243,6 @@ public sealed class DashboardSignalRService : IDashboardDataService
 
     #region Data Events
 
-    public event Action<JsonElement>? OnHealthDataReceived;
     public event Action<JsonElement>? OnOverviewDataReceived;
     public event Action<JsonElement>? OnOrleansDataReceived;
     public event Action<JsonElement>? OnInsightsDataReceived;
@@ -257,9 +250,6 @@ public sealed class DashboardSignalRService : IDashboardDataService
     #endregion
 
     #region Data Fetch
-
-    public Task<JsonElement> GetHealthPageDataAsync()
-        => InvokeHubMethodAsync("GetHealthPageData");
 
     public Task<JsonElement> GetOverviewPageDataAsync()
         => InvokeHubMethodAsync("GetOverviewPageData");

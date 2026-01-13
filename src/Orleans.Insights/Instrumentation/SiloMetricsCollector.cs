@@ -187,7 +187,7 @@ public sealed class SiloMetricsCollector : ILifecycleParticipant<ISiloLifecycle>
             var activationCounts = new Dictionary<string, long>();
             foreach (var stat in stats)
             {
-                var grainType = GetShortGrainTypeName(stat.GrainType);
+                var grainType = ExtractGrainTypeName(stat.GrainType);
                 activationCounts.TryGetValue(grainType, out var count);
                 activationCounts[grainType] = count + 1;
                 totalActivations++;
@@ -246,22 +246,26 @@ public sealed class SiloMetricsCollector : ILifecycleParticipant<ISiloLifecycle>
     }
 
     /// <summary>
-    /// Gets the short grain type name from the full type string.
-    /// Handles both Orleans GrainType format and full type names.
+    /// Extracts the full type name from the Orleans GrainType string.
+    /// Returns "Namespace.TypeName" to match GrainTypeNameCache format (Type.FullName).
+    ///
+    /// Input formats from Orleans GetDetailedGrainStatistics:
+    /// - "GrainReference=0000000000000000030000009a706b87+MyApp.Grains.MyGrain"
+    /// - "MyApp.Grains.MyGrain"
+    ///
+    /// Output: "MyApp.Grains.MyGrain" (full type name without GrainReference prefix)
     /// </summary>
-    private static string GetShortGrainTypeName(string grainType)
+    private static string ExtractGrainTypeName(string grainType)
     {
-        // GrainType format: "GrainReference=0000000000000000030000009a706b87+MyApp.Grains.MyGrain"
-        // or just "MyApp.Grains.MyGrain"
+        // GrainType format can have a prefix like:
+        // "GrainReference=0000000000000000030000009a706b87+MyApp.Grains.MyGrain"
         var plusIndex = grainType.LastIndexOf('+');
         if (plusIndex >= 0)
         {
             grainType = grainType[(plusIndex + 1)..];
         }
 
-        // Get the simple name (after last dot)
-        var dotIndex = grainType.LastIndexOf('.');
-        return dotIndex >= 0 ? grainType[(dotIndex + 1)..] : grainType;
+        return grainType;
     }
 
     public void Dispose()

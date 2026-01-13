@@ -854,6 +854,8 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
         }
 
         // Query per-grain-type total activations (sum across all silos)
+        // Note: grain_type_activations stores "Namespace.TypeName,AssemblyName" format
+        // while method_profile stores "Namespace.TypeName" format (Type.FullName without assembly)
         var activationsSql = """
             WITH latest AS (
                 SELECT grain_type, silo_id, MAX(timestamp) as max_ts
@@ -869,21 +871,32 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
 
         var activationResults = Database.Query(activationsSql, cutoff);
 
+        // Match activation grain types to method_profile grain types
+        // grain_type_activations has "Namespace.TypeName,AssemblyName" format
+        // method_profile has "Namespace.TypeName" format
         foreach (var row in activationResults)
         {
-            var grainType = InsightsQueryHelper.GetString(row, "grain_type");
+            var activationGrainType = InsightsQueryHelper.GetString(row, "grain_type");
             var totalActivations = InsightsQueryHelper.GetLong(row, "total_activations");
 
-            if (dict.TryGetValue(grainType, out var existing))
+            // Strip assembly suffix to get just "Namespace.TypeName"
+            var normalizedType = activationGrainType;
+            var commaIndex = activationGrainType.LastIndexOf(',');
+            if (commaIndex > 0)
             {
-                dict[grainType] = existing with { TotalActivations = totalActivations };
+                normalizedType = activationGrainType[..commaIndex];
+            }
+
+            if (dict.TryGetValue(normalizedType, out var existing))
+            {
+                dict[normalizedType] = existing with { TotalActivations = totalActivations };
             }
             else
             {
-                // Grain type has activations but no method calls yet
-                dict[grainType] = new AggregatedGrainTypeMetrics
+                // Grain type has activations but no method calls yet - use the normalized type as key
+                dict[normalizedType] = new AggregatedGrainTypeMetrics
                 {
-                    GrainType = grainType,
+                    GrainType = normalizedType,
                     TotalActivations = totalActivations,
                     LastUpdated = DateTime.UtcNow
                 };
@@ -1106,6 +1119,8 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
 
         // Query per-grain-type activations from the grain_type_activations table
         // Get the latest activation count per grain type per silo
+        // Note: grain_type_activations stores "Namespace.TypeName,AssemblyName" format
+        // while method_profile stores "Namespace.TypeName" format
         var activationsSql = """
             WITH latest AS (
                 SELECT grain_type, silo_id, MAX(timestamp) as max_ts
@@ -1120,16 +1135,25 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
 
         var activationResults = Database.Query(activationsSql, cutoff);
 
+        // Match activation grain types to method_profile grain types by stripping assembly suffix
         foreach (var row in activationResults)
         {
-            var grainType = InsightsQueryHelper.GetString(row, "grain_type");
+            var activationGrainType = InsightsQueryHelper.GetString(row, "grain_type");
             var siloId = InsightsQueryHelper.GetString(row, "silo_id");
             var activations = (int)InsightsQueryHelper.GetLong(row, "activations");
 
-            if (!perSiloStats.TryGetValue(grainType, out var siloDict))
+            // Strip assembly suffix to get just "Namespace.TypeName"
+            var normalizedType = activationGrainType;
+            var commaIndex = activationGrainType.LastIndexOf(',');
+            if (commaIndex > 0)
+            {
+                normalizedType = activationGrainType[..commaIndex];
+            }
+
+            if (!perSiloStats.TryGetValue(normalizedType, out var siloDict))
             {
                 siloDict = new Dictionary<string, SiloGrainStats>();
-                perSiloStats[grainType] = siloDict;
+                perSiloStats[normalizedType] = siloDict;
             }
 
             if (siloDict.TryGetValue(siloId, out var existingStats))

@@ -1,8 +1,25 @@
 using Orleans.Insights;
 using Orleans.Insights.Dashboard;
 using Orleans.Insights.Sample.Services;
+using Serilog;
+using Serilog.Events;
+
+// Configure Serilog with file logging for diagnostics
+Log.Logger = new LoggerConfiguration()
+    .MinimumLevel.Information()
+    .MinimumLevel.Override("Microsoft", LogEventLevel.Warning)
+    .MinimumLevel.Override("Orleans", LogEventLevel.Warning)
+    .MinimumLevel.Override("Orleans.Insights", LogEventLevel.Information) // Keep Insights logs at Info level
+    .WriteTo.Console(outputTemplate: "[{Timestamp:HH:mm:ss} {Level:u3}] {Message:lj}{NewLine}{Exception}")
+    .WriteTo.File("logs/orleans-insights-.log",
+        rollingInterval: RollingInterval.Day,
+        outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {Message:lj}{NewLine}{Exception}")
+    .CreateLogger();
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Use Serilog for logging
+builder.Host.UseSerilog();
 
 // Configure Orleans silo with insights
 builder.UseOrleans(siloBuilder =>

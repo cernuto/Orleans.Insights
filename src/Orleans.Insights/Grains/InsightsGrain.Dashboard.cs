@@ -1,7 +1,6 @@
 using Microsoft.Extensions.Logging;
 using Orleans.Insights.Models;
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
@@ -9,26 +8,11 @@ using System.Threading.Tasks;
 namespace Orleans.Insights.Grains;
 
 /// <summary>
-/// Partial class implementing health ingestion/query and dashboard page query methods.
+/// Partial class implementing dashboard page query methods.
 /// Supports horizontal scaling by providing centralized state access.
 /// </summary>
 public partial class InsightsGrain
 {
-    #region Health Storage
-
-    /// <summary>
-    /// In-memory storage for silo health reports.
-    /// Key: SiloId, Value: Most recent health report.
-    /// </summary>
-    private readonly ConcurrentDictionary<string, SiloHealthReport> _healthReports = new();
-
-    /// <summary>
-    /// How long before a health report is considered stale (30 seconds).
-    /// </summary>
-    private static readonly TimeSpan HealthStaleThreshold = TimeSpan.FromSeconds(30);
-
-    #endregion
-
     #region Dashboard Page Cache
 
     /// <summary>
@@ -43,77 +27,8 @@ public partial class InsightsGrain
     private OrleansPageData? _cachedOrleans;
     private DateTime _orleansCacheTime;
 
-    private HealthPageData? _cachedHealth;
-    private DateTime _healthCacheTime;
-
     private InsightsPageData? _cachedInsights;
     private DateTime _insightsCacheTime;
-
-    #endregion
-
-    #region IHealthIngestGrain Implementation
-
-    /// <inheritdoc/>
-    public Task IngestHealthReport(HealthReportData report)
-    {
-        try
-        {
-            var overallStatus = SiloHealthReport.ComputeOverallStatus(report.Checks);
-
-            var siloReport = new SiloHealthReport
-            {
-                SiloId = report.SiloId,
-                HostName = report.HostName,
-                LastReported = report.Timestamp,
-                OverallStatus = overallStatus,
-                Checks = report.Checks
-            };
-
-            _healthReports.AddOrUpdate(report.SiloId, siloReport, (_, _) => siloReport);
-
-            if (_logger.IsEnabled(LogLevel.Debug))
-            {
-                _logger.LogDebug(
-                    "Ingested health report from {SiloId}: {Status} ({Checks} checks)",
-                    report.SiloId, overallStatus, report.Checks.Count);
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to ingest health report from {SiloId}", report.SiloId);
-        }
-
-        return Task.CompletedTask;
-    }
-
-    #endregion
-
-    #region IHealthQueryGrain Implementation
-
-    /// <inheritdoc/>
-    public Task<List<SiloHealthReport>> GetClusterHealth()
-    {
-        var now = DateTime.UtcNow;
-        var staleThreshold = now - HealthStaleThreshold;
-
-        // Filter out stale reports and collect active ones
-        var activeReports = new List<SiloHealthReport>();
-
-        foreach (var kvp in _healthReports)
-        {
-            if (kvp.Value.LastReported >= staleThreshold)
-            {
-                activeReports.Add(kvp.Value);
-            }
-            else
-            {
-                // Remove stale entry
-                _healthReports.TryRemove(kvp.Key, out _);
-            }
-        }
-
-        return Task.FromResult(activeReports);
-    }
 
     #endregion
 
@@ -133,9 +48,6 @@ public partial class InsightsGrain
         // Get aggregated cluster metrics
         var aggregated = await GetAggregatedMetrics();
 
-        // Get health data
-        var healthReports = await GetClusterHealth();
-
         // Build silo summaries
         var siloInfos = await GetReportingSilos();
         var silos = siloInfos.Select(s => new SiloSummary
@@ -148,34 +60,14 @@ public partial class InsightsGrain
             MemoryUsageMb = aggregated.ClusterMetrics.TotalMemoryUsageMb / Math.Max(1, siloInfos.Length)
         }).ToList();
 
-        // Build health endpoint summaries
-        int healthyCount = 0, unhealthyCount = 0;
-        var healthEndpoints = new List<HealthEndpointSummary>();
-
-        foreach (var report in healthReports)
-        {
-            healthEndpoints.Add(new HealthEndpointSummary
-            {
-                Name = report.HostName,
-                OverallStatus = report.OverallStatus,
-                CheckCount = report.Checks.Count
-            });
-
-            if (report.OverallStatus == "Healthy") healthyCount++;
-            else if (report.OverallStatus == "Unhealthy") unhealthyCount++;
-        }
-
         _cachedOverview = new OverviewPageData
         {
             SiloCount = siloInfos.Length,
             TotalGrains = (int)aggregated.ClusterMetrics.TotalActivations,
             CpuPercent = aggregated.ClusterMetrics.AverageCpuUsagePercent,
             MemoryUsedMb = aggregated.ClusterMetrics.TotalMemoryUsageMb,
-            HealthyEndpoints = healthyCount,
-            UnhealthyEndpoints = unhealthyCount,
             Timestamp = now,
-            Silos = silos,
-            HealthEndpoints = healthEndpoints
+            Silos = silos
         };
         _overviewCacheTime = now;
         return _cachedOverview;
@@ -271,46 +163,6 @@ public partial class InsightsGrain
         };
         _orleansCacheTime = now;
         return _cachedOrleans;
-    }
-
-    /// <inheritdoc/>
-    public async Task<HealthPageData> GetHealthPageData()
-    {
-        var now = DateTime.UtcNow;
-
-        // Return cached data if still valid
-        if (_cachedHealth != null && now - _healthCacheTime < PageCacheTtl)
-        {
-            return _cachedHealth;
-        }
-
-        var reports = await GetClusterHealth();
-
-        int healthyCount = 0, degradedCount = 0, unhealthyCount = 0;
-
-        foreach (var report in reports)
-        {
-            foreach (var check in report.Checks)
-            {
-                switch (check.Status)
-                {
-                    case "Healthy": healthyCount++; break;
-                    case "Degraded": degradedCount++; break;
-                    case "Unhealthy": unhealthyCount++; break;
-                }
-            }
-        }
-
-        _cachedHealth = new HealthPageData
-        {
-            SiloReports = reports,
-            Timestamp = now,
-            HealthyCount = healthyCount,
-            DegradedCount = degradedCount,
-            UnhealthyCount = unhealthyCount
-        };
-        _healthCacheTime = now;
-        return _cachedHealth;
     }
 
     /// <inheritdoc/>

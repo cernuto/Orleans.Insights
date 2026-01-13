@@ -28,18 +28,14 @@ public static class GrainTypeNameCache
     private static readonly ConcurrentDictionary<Type, bool> _shouldInstrument = new();
 
     /// <summary>
-    /// Gets the full display name for a grain type including namespace and assembly.
-    /// Format: "Namespace.TypeName,AssemblyName" for troubleshooting purposes.
+    /// Gets the full type name for a grain type.
+    /// Format: "Namespace.TypeName" (Type.FullName without assembly info).
     /// </summary>
     /// <param name="grainType">The grain type</param>
-    /// <returns>Full type name with assembly (e.g., "MyApp.Grains.MyGrain,MyApp.Grains")</returns>
+    /// <returns>Full type name (e.g., "MyApp.Grains.MyGrain")</returns>
     public static string GetGrainTypeName(Type grainType)
     {
-        return _grainTypeNames.GetOrAdd(grainType, static t =>
-        {
-            var assemblyName = t.Assembly.GetName().Name;
-            return $"{t.FullName},{assemblyName}";
-        });
+        return _grainTypeNames.GetOrAdd(grainType, static t => t.FullName ?? t.Name);
     }
 
     /// <summary>
