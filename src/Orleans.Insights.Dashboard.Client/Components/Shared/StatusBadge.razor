@@ -1,0 +1,24 @@
+@code {
+    [Parameter] public string Status { get; set; } = "Healthy";
+}
+
+<span class="status-badge @GetBadgeClass()">
+    <span class="status-dot @GetDotClass()"></span>
+    @Status
+</span>
+
+@code {
+    string GetBadgeClass() => Status switch
+    {
+        "Healthy" => "badge-healthy",
+        "Degraded" => "badge-degraded",
+        _ => "badge-unhealthy"
+    };
+
+    string GetDotClass() => Status switch
+    {
+        "Healthy" => "status-healthy",
+        "Degraded" => "status-degraded",
+        _ => "status-unhealthy"
+    };
+}

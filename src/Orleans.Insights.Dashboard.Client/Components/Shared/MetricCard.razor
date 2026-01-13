@@ -1,0 +1,10 @@
+@code {
+    [Parameter] public string Value { get; set; } = "0";
+    [Parameter] public string Label { get; set; } = "";
+    [Parameter] public string? ColorClass { get; set; }
+}
+
+<div class="card metric-card">
+    <div class="metric-value @ColorClass">@Value</div>
+    <div class="metric-label">@Label</div>
+</div>

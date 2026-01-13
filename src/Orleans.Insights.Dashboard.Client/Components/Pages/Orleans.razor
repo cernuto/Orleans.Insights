@@ -1,0 +1,1138 @@
+@page "/orleans"
+@* Method profiling data sourced from DuckDB via InsightsGrain *@
+@inject IDashboardDataService DataService
+@inject ILogger<Orleans> Logger
+@implements IAsyncDisposable
+
+<div class="page-header">
+    <h1 class="page-title">Grains</h1>
+    <p class="page-subtitle">Grain monitoring and method profiling</p>
+    @if (SelectedGrainType != null)
+    {
+        <div style="margin-top: 0.5rem;">
+            <span style="color: var(--success);">Selected: @GetShortTypeName(SelectedGrainType)</span>
+        </div>
+    }
+    <div class="refresh-indicator">
+        <span class="refresh-dot @(_isConnected ? "" : "loading")"></span>
+        <span>@(_isConnected ? "Live" : "Connecting...")</span>
+    </div>
+</div>
+
+<!-- Silo Selector -->
+@if (_data.Silos.Count > 0)
+{
+    <div class="card orleans-card silo-selector-card">
+        <div class="card-header clickable" @onclick="ToggleSiloPanel">
+            <span class="card-title">
+                <svg class="expand-icon @(_silosExpanded ? "expanded" : "")" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px; margin-right: 0.5rem; transition: transform 0.2s;">
+                    <polyline points="9 18 15 12 9 6"/>
+                </svg>
+                Silos (@_data.Silos.Count active)
+            </span>
+        </div>
+
+        <!-- Compact silo chips (hidden when expanded to avoid duplication) -->
+        @if (!_silosExpanded)
+        {
+        <div class="silo-chips-container">
+            @foreach (var silo in GetOrderedSilos())
+            {
+                var isSelected = IsSiloSelected(silo.Address);
+                <div class="silo-chip @(isSelected ? "selected" : "")" @onclick="() => ToggleSiloSelection(silo.Address)" @onclick:stopPropagation="true">
+                    <span class="silo-chip-checkbox">@(isSelected ? "☑" : "☐")</span>
+                    <span class="silo-chip-name">@GetSiloDisplayName(silo.Address)</span>
+                    <StatusBadge Status="@(silo.Status == "Active" ? "Healthy" : "Degraded")" />
+                </div>
+            }
+            @if (!_allSilosSelected)
+            {
+                <div class="silo-chip select-all" @onclick="SelectAllSilos" @onclick:stopPropagation="true">
+                    <span class="silo-chip-checkbox">↻</span>
+                    <span class="silo-chip-name">Select All</span>
+                </div>
+            }
+        </div>
+        }
+
+        <!-- Expanded silo details -->
+        @if (_silosExpanded)
+        {
+            <div class="silo-details-grid">
+                @foreach (var silo in GetOrderedSilos())
+                {
+                    var isSelected = IsSiloSelected(silo.Address);
+                    <div class="silo-detail-card @(isSelected ? "selected" : "")" @onclick="() => ToggleSiloSelection(silo.Address)">
+                        <div class="silo-detail-header">
+                            <span class="silo-chip-checkbox">@(isSelected ? "☑" : "☐")</span>
+                            <span class="silo-detail-name">@GetSiloDisplayName(silo.Address)</span>
+                            <StatusBadge Status="@(silo.Status == "Active" ? "Healthy" : "Degraded")" />
+                        </div>
+                        <div class="silo-detail-metrics">
+                            <div class="silo-metric">
+                                <span class="silo-metric-label">Activations</span>
+                                <span class="silo-metric-value">@silo.ActivationCount.ToString("N0")</span>
+                            </div>
+                            <div class="silo-metric">
+                                <span class="silo-metric-label">CPU</span>
+                                <span class="silo-metric-value @GetCpuColorClass(silo.CpuUsage)">@($"{silo.CpuUsage:F0}%")</span>
+                            </div>
+                            <div class="silo-metric">
+                                <span class="silo-metric-label">Memory</span>
+                                <span class="silo-metric-value">@FormatMemory(silo.MemoryUsageMb)</span>
+                            </div>
+                        </div>
+                    </div>
+                }
+                @if (!_allSilosSelected)
+                {
+                    <div class="silo-detail-card select-all" @onclick="SelectAllSilos">
+                        <div class="silo-detail-header" style="justify-content: center;">
+                            <span class="silo-chip-checkbox">↻</span>
+                            <span class="silo-detail-name">Select All Silos</span>
+                        </div>
+                    </div>
+                }
+            </div>
+        }
+    </div>
+}
+
+<!-- Grain Summary Cards -->
+<div class="grid-4">
+    <MetricCard Value="@GetFilteredActivations().ToString("N0")" Label="Active Grains" />
+    <MetricCard Value="@GetFilteredGrainStats().Count.ToString()" Label="Grain Types" />
+    <MetricCard Value="@GetFilteredTotalRequests().ToString("N0")" Label="Total Requests" />
+    <MetricCard Value="@($"{GetFilteredAvgLatency():F1}ms")" Label="Avg Latency" />
+</div>
+
+<!-- Orleans OTel Metrics - Built-in Orleans instrumentation -->
+<div class="card orleans-card" style="margin-top: 1.5rem;">
+    <div class="card-header">
+        <span class="card-title">Orleans Telemetry (OpenTelemetry)</span>
+        <span class="refresh-indicator">
+            <span class="refresh-dot orleans-pulse"></span>
+            <span>Live</span>
+        </span>
+    </div>
+    <div class="grid-4" style="padding: 1rem;">
+        <div class="metric-box">
+            <div class="metric-label">Requests/sec</div>
+            <div class="metric-value">@_requestsPerSecond.ToString("F1")</div>
+        </div>
+        <div class="metric-box">
+            <div class="metric-label">Failed Requests</div>
+            <div class="metric-value @(_failedRequests > 0 ? "text-danger" : "")">@FormatNumber(_failedRequests)</div>
+        </div>
+        <div class="metric-box">
+            <div class="metric-label">Connected Clients</div>
+            <div class="metric-value">@_data.OTelMetrics.ConnectedClients</div>
+        </div>
+        <div class="metric-box">
+            <div class="metric-label">OTel Activations</div>
+            <div class="metric-value">@_data.OTelMetrics.TotalActivations.ToString("N0")</div>
+        </div>
+    </div>
+    <div class="grid-4" style="padding: 0 1rem 1rem 1rem;">
+        <div class="metric-box">
+            <div class="metric-label">Messages Sent</div>
+            <div class="metric-value">@FormatNumber(_data.OTelMetrics.MessagesSent)</div>
+        </div>
+        <div class="metric-box">
+            <div class="metric-label">Messages Received</div>
+            <div class="metric-value">@FormatNumber(_data.OTelMetrics.MessagesReceived)</div>
+        </div>
+        <div class="metric-box">
+            <div class="metric-label">Messages Dropped</div>
+            <div class="metric-value @(_data.OTelMetrics.MessagesDropped > 0 ? "text-danger" : "")">@_data.OTelMetrics.MessagesDropped</div>
+        </div>
+        <div class="metric-box">
+            <div class="metric-label">Memory Used</div>
+            <div class="metric-value">@FormatMemory(_data.OTelMetrics.MemoryUsageMb)</div>
+        </div>
+    </div>
+</div>
+
+<!-- Catalog Metrics - Activation lifecycle metrics from Orleans -->
+<div class="card orleans-card">
+    <div class="card-header clickable" @onclick="() => _catalogMetricsExpanded = !_catalogMetricsExpanded">
+        <span class="card-title">
+            <svg class="expand-icon @(_catalogMetricsExpanded ? "expanded" : "")" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px; margin-right: 0.5rem; transition: transform 0.2s;">
+                <polyline points="9 18 15 12 9 6"/>
+            </svg>
+            Catalog Metrics (Activation Lifecycle)
+        </span>
+        <span class="refresh-indicator">
+            <span class="refresh-dot orleans-pulse"></span>
+            <span>Live</span>
+        </span>
+    </div>
+    @if (_catalogMetricsExpanded)
+    {
+    <div class="grid-4" style="padding: 1rem;">
+        <div class="metric-box">
+            <div class="metric-label">Grain Count</div>
+            <div class="metric-value">@_data.OTelMetrics.GrainCount.ToString("N0")</div>
+        </div>
+        <div class="metric-box">
+            <div class="metric-label">System Targets</div>
+            <div class="metric-value">@_data.OTelMetrics.SystemTargets.ToString("N0")</div>
+        </div>
+        <div class="metric-box">
+            <div class="metric-label">Working Set</div>
+            <div class="metric-value">@_data.OTelMetrics.ActivationWorkingSet.ToString("N0")</div>
+        </div>
+        <div class="metric-box">
+            <div class="metric-label">Created</div>
+            <div class="metric-value text-success">@FormatNumber(_data.OTelMetrics.ActivationsCreated)</div>
+        </div>
+    </div>
+    <div class="grid-4" style="padding: 0 1rem 1rem 1rem;">
+        <div class="metric-box">
+            <div class="metric-label">Destroyed</div>
+            <div class="metric-value">@FormatNumber(_data.OTelMetrics.ActivationsDestroyed)</div>
+        </div>
+        <div class="metric-box">
+            <div class="metric-label">Failed to Activate</div>
+            <div class="metric-value @(_data.OTelMetrics.ActivationsFailedToActivate > 0 ? "text-danger" : "")">@_data.OTelMetrics.ActivationsFailedToActivate</div>
+        </div>
+        <div class="metric-box">
+            <div class="metric-label">Collections</div>
+            <div class="metric-value">@FormatNumber(_data.OTelMetrics.ActivationCollections)</div>
+        </div>
+        <div class="metric-box">
+            <div class="metric-label">Shutdowns</div>
+            <div class="metric-value">@FormatNumber(_data.OTelMetrics.ActivationShutdowns)</div>
+        </div>
+    </div>
+    <div class="grid-4" style="padding: 0 1rem 1rem 1rem;">
+        <div class="metric-box">
+            <div class="metric-label">Non-Existent</div>
+            <div class="metric-value @(_data.OTelMetrics.ActivationNonExistent > 0 ? "text-warning" : "")">@_data.OTelMetrics.ActivationNonExistent</div>
+        </div>
+        <div class="metric-box">
+            <div class="metric-label">Concurrent Reg. Attempts</div>
+            <div class="metric-value">@_data.OTelMetrics.ConcurrentRegistrationAttempts</div>
+        </div>
+        <div class="metric-box"></div>
+        <div class="metric-box"></div>
+    </div>
+    }
+</div>
+
+<!-- Activations by Type -->
+<div class="card orleans-card">
+    <div class="card-header">
+        <span class="card-title">Activations by Type</span>
+        <span class="refresh-indicator">
+            <span class="refresh-dot orleans-pulse"></span>
+            <span>Live</span>
+        </span>
+    </div>
+    @if (_data.GrainStats.Count > 0)
+    {
+        <table class="table orleans-table">
+            <thead>
+                <tr>
+                    <th class="sortable" @onclick="@(() => SortBy("Grain"))">
+                        Grain @SortIndicator("Grain")
+                    </th>
+                    <th class="text-right sortable" @onclick="@(() => SortBy("Activations"))">
+                        Activations @SortIndicator("Activations")
+                    </th>
+                    <th class="text-right sortable" @onclick="@(() => SortBy("ExceptionRate"))">
+                        Exception rate @SortIndicator("ExceptionRate")
+                    </th>
+                    <th class="text-right sortable" @onclick="@(() => SortBy("Throughput"))">
+                        Throughput @SortIndicator("Throughput")
+                    </th>
+                    <th class="text-right sortable" @onclick="@(() => SortBy("Latency"))">
+                        Latency @SortIndicator("Latency")
+                    </th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var stat in GetSortedGrainStats())
+                {
+                    var grainType = stat.GrainType;
+                    var isSelected = grainType.Equals(SelectedGrainType, StringComparison.OrdinalIgnoreCase);
+                    <tr @onclick="() => SelectGrainByType(grainType)"
+                        class="@(isSelected ? "selected" : "")"
+                        style="cursor: pointer;">
+                        <td>
+                            <span class="font-mono grain-name">@GetShortTypeName(stat.GrainType)</span>
+                        </td>
+                        <td class="text-right">@FormatActivations(stat.TotalActivations)</td>
+                        <td class="text-right">@stat.ExceptionRate.ToString("F2") %</td>
+                        <td class="text-right">@stat.RequestsPerSecond.ToString("F2") <span class="text-muted">req/sec</span></td>
+                        <td class="text-right">@stat.AverageLatencyMs.ToString("F2") <span class="text-muted">ms/req</span></td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+    else
+    {
+        <div class="empty-state">No grain activations</div>
+    }
+</div>
+
+<!-- Method Profiling Section -->
+@if (SelectedGrainType != null && SelectedGrainStats != null)
+{
+    <div class="card orleans-card">
+        <div class="card-header">
+            <span class="card-title">
+                <span class="grain-detail-name">@GetShortTypeName(SelectedGrainType)</span>
+                <span class="text-muted grain-full-name">@SelectedGrainType</span>
+            </span>
+            <button class="close-btn" @onclick="ClearSelection" title="Close">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                    <line x1="18" y1="6" x2="6" y2="18"></line>
+                    <line x1="6" y1="6" x2="18" y2="18"></line>
+                </svg>
+            </button>
+        </div>
+
+        <div class="grain-metrics-summary">
+            <div class="grain-metric-box">
+                <svg class="grain-metric-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="3" y="3" width="7" height="7" rx="1"/>
+                    <rect x="14" y="3" width="7" height="7" rx="1"/>
+                    <rect x="3" y="14" width="7" height="7" rx="1"/>
+                    <rect x="14" y="14" width="7" height="7" rx="1"/>
+                </svg>
+                <div class="grain-metric-content">
+                    <span class="grain-metric-label">ACTIVATIONS</span>
+                    <span class="grain-metric-value">@SelectedGrainStats.TotalActivations</span>
+                </div>
+            </div>
+            <div class="grain-metric-box">
+                <svg class="grain-metric-icon danger" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+                    <line x1="12" y1="9" x2="12" y2="13"/>
+                    <line x1="12" y1="17" x2="12.01" y2="17"/>
+                </svg>
+                <div class="grain-metric-content">
+                    <span class="grain-metric-label">ERROR RATE</span>
+                    <span class="grain-metric-value">@SelectedGrainStats.ExceptionRate.ToString("F2")%</span>
+                </div>
+            </div>
+            <div class="grain-metric-box">
+                <svg class="grain-metric-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+                </svg>
+                <div class="grain-metric-content">
+                    <span class="grain-metric-label">REQ/SEC</span>
+                    <span class="grain-metric-value">@SelectedGrainStats.RequestsPerSecond.ToString("F2")</span>
+                </div>
+            </div>
+            <div class="grain-metric-box">
+                <svg class="grain-metric-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="10"/>
+                    <polyline points="12 6 12 12 16 14"/>
+                </svg>
+                <div class="grain-metric-content">
+                    <span class="grain-metric-label">AVERAGE RES.</span>
+                    <span class="grain-metric-value">@SelectedGrainStats.AverageLatencyMs.ToString("F2")ms</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Method Profiling Charts -->
+        <div class="method-profiling">
+            <h3 class="section-title">Method Profiling</h3>
+            <div class="profiling-legend">
+                <span class="legend-item"><span class="legend-color requests"></span> requests per second</span>
+                <span class="legend-item"><span class="legend-color failed"></span> failed requests</span>
+                <span class="legend-item"><span class="legend-color latency"></span> latency (ms)</span>
+            </div>
+
+            @{
+                var grainMethods = _data.TopMethods.Where(m => GetShortTypeName(m.GrainType) == GetShortTypeName(SelectedGrainType)).ToList();
+            }
+            @if (grainMethods.Count > 0)
+            {
+                @foreach (var method in grainMethods)
+                {
+                    <div class="method-chart" @key="@($"{SelectedGrainType}::{method.MethodName}")">
+                        <h4 class="method-name">@method.MethodName</h4>
+                        <MethodProfileChart MethodName="@method.MethodName" GrainType="@SelectedGrainType" />
+                    </div>
+                }
+            }
+            else
+            {
+                <div class="empty-state">No method data for this grain</div>
+            }
+        </div>
+    </div>
+}
+
+<style>
+    .orleans-card {
+        border-left: 3px solid var(--orleans-purple, #68217a);
+    }
+
+    .orleans-pulse {
+        animation: pulse 2s ease-in-out infinite;
+        background-color: var(--orleans-purple, #68217a);
+    }
+
+    .clickable {
+        cursor: pointer;
+    }
+
+    .expand-icon {
+        transition: transform 0.2s ease;
+    }
+
+    .expand-icon.expanded {
+        transform: rotate(90deg);
+    }
+
+    /* Silo selector styles */
+    .silo-chips-container {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        padding: 0.75rem 1rem;
+        border-top: 1px solid var(--border);
+    }
+
+    .silo-chip {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        padding: 0.3rem 0.6rem;
+        background: var(--bg-secondary);
+        border-radius: var(--radius);
+        font-size: 0.85rem;
+        cursor: pointer;
+        transition: opacity 0.15s ease, background-color 0.15s ease;
+    }
+
+    .silo-chip:hover {
+        background: var(--bg-hover, rgba(255, 255, 255, 0.1));
+    }
+
+    .silo-chip:not(.selected) {
+        opacity: 0.5;
+    }
+
+    .silo-chip.select-all {
+        background: var(--orleans-purple, #68217a);
+        opacity: 1;
+    }
+
+    .silo-chip.select-all:hover {
+        background: #7a2990;
+    }
+
+    .silo-chip-checkbox {
+        color: var(--success);
+    }
+
+    .silo-chip:not(.selected) .silo-chip-checkbox {
+        color: var(--text-muted);
+    }
+
+    .silo-details-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+        gap: 1rem;
+        padding: 1rem;
+        border-top: 1px solid var(--border);
+    }
+
+    .silo-detail-card {
+        background: var(--bg-secondary);
+        border-radius: var(--radius);
+        padding: 0.75rem;
+        cursor: pointer;
+        transition: opacity 0.15s ease;
+    }
+
+    .silo-detail-card:hover {
+        background: var(--bg-hover, rgba(255, 255, 255, 0.1));
+    }
+
+    .silo-detail-card:not(.selected) {
+        opacity: 0.5;
+    }
+
+    .silo-detail-card:not(.selected) .silo-chip-checkbox {
+        color: var(--text-muted);
+    }
+
+    .silo-detail-card.select-all {
+        background: var(--orleans-purple, #68217a);
+        opacity: 1;
+    }
+
+    .silo-detail-card.select-all:hover {
+        background: #7a2990;
+    }
+
+    .silo-detail-header {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        margin-bottom: 0.75rem;
+    }
+
+    .silo-detail-name {
+        flex: 1;
+        font-weight: 500;
+    }
+
+    .silo-detail-metrics {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 0.5rem;
+    }
+
+    .silo-metric {
+        text-align: center;
+    }
+
+    .silo-metric-label {
+        font-size: 0.7rem;
+        color: var(--text-muted);
+        text-transform: uppercase;
+    }
+
+    .silo-metric-value {
+        font-size: 0.9rem;
+        font-weight: 600;
+    }
+
+    /* Metric box styles */
+    .metric-box {
+        background: var(--bg-secondary);
+        padding: 1rem;
+        border-radius: var(--radius);
+        text-align: center;
+    }
+
+    .metric-label {
+        color: var(--text-muted);
+        font-size: 0.85rem;
+        margin-bottom: 0.25rem;
+    }
+
+    .metric-value {
+        font-size: 1.25rem;
+        font-weight: 600;
+    }
+
+    /* Sortable table styles */
+    .orleans-table .sortable {
+        cursor: pointer;
+        user-select: none;
+    }
+
+    .orleans-table .sortable:hover {
+        background: var(--bg-hover, rgba(255, 255, 255, 0.05));
+    }
+
+    .sort-arrow {
+        margin-left: 0.25rem;
+        font-size: 0.8rem;
+    }
+
+    .sort-arrow.muted {
+        opacity: 0.3;
+    }
+
+    .orleans-table tbody tr {
+        cursor: pointer;
+        transition: background-color 0.15s ease;
+    }
+
+    .orleans-table tbody tr:hover {
+        background-color: var(--bg-hover, rgba(255, 255, 255, 0.05));
+    }
+
+    .orleans-table tbody tr.selected {
+        background-color: var(--bg-selected, rgba(104, 33, 122, 0.2));
+    }
+
+    .grain-name {
+        color: var(--text-primary);
+    }
+
+    /* Grain detail section */
+    .grain-detail-name {
+        font-weight: 600;
+    }
+
+    .grain-full-name {
+        font-size: 0.8rem;
+        margin-left: 0.5rem;
+    }
+
+    .close-btn {
+        background: transparent;
+        border: none;
+        color: var(--text-muted);
+        cursor: pointer;
+        padding: 0.25rem;
+        border-radius: var(--radius);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+
+    .close-btn:hover {
+        color: var(--text-primary);
+        background-color: var(--bg-hover, rgba(255, 255, 255, 0.1));
+    }
+
+    .grain-metrics-summary {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 1rem;
+        padding: 1rem;
+        border-bottom: 1px solid var(--border);
+    }
+
+    .grain-metric-box {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        padding: 0.75rem;
+        background: var(--bg-secondary);
+        border-radius: var(--radius);
+    }
+
+    .grain-metric-icon {
+        width: 24px;
+        height: 24px;
+        stroke: var(--orleans-purple, #68217a);
+        flex-shrink: 0;
+    }
+
+    .grain-metric-icon.danger {
+        stroke: var(--danger);
+    }
+
+    .grain-metric-content {
+        display: flex;
+        flex-direction: column;
+    }
+
+    .grain-metric-label {
+        font-size: 0.65rem;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+
+    .grain-metric-value {
+        font-size: 1.1rem;
+        font-weight: 600;
+    }
+
+    /* Method profiling section */
+    .method-profiling {
+        padding: 1rem;
+    }
+
+    .section-title {
+        font-size: 1rem;
+        font-weight: 600;
+        margin-bottom: 0.75rem;
+        color: var(--text-primary);
+    }
+
+    .profiling-legend {
+        display: flex;
+        gap: 1.5rem;
+        margin-bottom: 1rem;
+        font-size: 0.8rem;
+        color: var(--text-muted);
+    }
+
+    .legend-item {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+    }
+
+    .legend-color {
+        width: 12px;
+        height: 3px;
+        border-radius: 1px;
+    }
+
+    .legend-color.requests {
+        background: rgba(120, 57, 136, 1);
+    }
+
+    .legend-color.failed {
+        background: rgba(239, 68, 68, 1);
+    }
+
+    .legend-color.latency {
+        background: rgba(236, 151, 31, 1);
+    }
+
+    .method-chart {
+        margin-bottom: 1.5rem;
+        padding: 1rem;
+        background: var(--bg-secondary);
+        border-radius: var(--radius);
+    }
+
+    .method-name {
+        font-size: 0.9rem;
+        font-weight: 500;
+        margin-bottom: 0.75rem;
+        color: var(--text-primary);
+    }
+
+    @@keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.5; }
+    }
+
+    @@media (max-width: 768px) {
+        .grain-metrics-summary {
+            grid-template-columns: repeat(2, 1fr);
+        }
+    }
+</style>
+
+@code {
+    private OrleansPageViewModel _data = OrleansPageViewModel.Empty;
+    private bool _isConnected;
+    private bool _silosExpanded;
+    private bool _catalogMetricsExpanded;
+
+    // Silo selection state - empty means "all selected"
+    private HashSet<string> _selectedSiloAddresses = new();
+    private bool _allSilosSelected = true;
+
+    // Sorting state
+    private string _sortColumn = "Activations";
+    private bool _sortDescending = true;
+
+    // Calculated values
+    private double _requestsPerSecond;
+    private long _failedRequests;
+    private long _prevTotalRequests;
+    private DateTime _prevUpdateTime = DateTime.UtcNow;
+
+    private string? SelectedGrainType { get; set; }
+
+    private GrainStatsSummaryViewModel? SelectedGrainStats => SelectedGrainType != null
+        ? FindGrainStats(SelectedGrainType)
+        : null;
+
+    private GrainStatsSummaryViewModel? FindGrainStats(string grainType)
+    {
+        for (int i = 0; i < _data.GrainStats.Count; i++)
+        {
+            if (_data.GrainStats[i].GrainType.Equals(grainType, StringComparison.OrdinalIgnoreCase))
+                return _data.GrainStats[i];
+        }
+        return null;
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        DataService.OnConnectionStateChanged += OnConnectionStateChanged;
+        _isConnected = DataService.IsConnected;
+
+        DataService.OnOrleansDataReceived += OnOrleansDataReceived;
+
+        await DataService.StartAsync();
+        await SubscribeAndFetchAsync();
+    }
+
+    private async Task SubscribeAndFetchAsync()
+    {
+        // Wait for connection with timeout
+        if (!DataService.IsConnected)
+        {
+            var connected = await DataService.WaitForConnectionAsync(TimeSpan.FromSeconds(15));
+            if (!connected)
+            {
+                Logger.LogWarning("Timed out waiting for SignalR connection on Orleans page");
+                return;
+            }
+        }
+
+        await DataService.SubscribeToPage(ClientDashboardPages.Orleans);
+
+        // Fetch initial data immediately so page doesn't show empty
+        try
+        {
+            var data = await DataService.GetOrleansPageDataAsync();
+            if (data.ValueKind != JsonValueKind.Undefined)
+            {
+                UpdateData(OrleansPageViewModel.FromJson(data));
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to fetch initial Orleans data");
+        }
+    }
+
+    private async void OnConnectionStateChanged(bool connected)
+    {
+        _isConnected = connected;
+        await InvokeAsync(StateHasChanged);
+
+        // Re-subscribe and fetch data when connection is restored
+        if (connected)
+        {
+            await SubscribeAndFetchAsync();
+        }
+    }
+
+    private void OnOrleansDataReceived(JsonElement data)
+    {
+        try
+        {
+            UpdateData(OrleansPageViewModel.FromJson(data));
+            InvokeAsync(StateHasChanged);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to parse Orleans data");
+        }
+    }
+
+    private void UpdateData(OrleansPageViewModel newData)
+    {
+        // Calculate requests per second based on delta
+        var now = DateTime.UtcNow;
+        var elapsed = (now - _prevUpdateTime).TotalSeconds;
+        if (elapsed > 0.1 && _prevTotalRequests > 0)
+        {
+            var delta = newData.OTelMetrics.TotalRequests - _prevTotalRequests;
+            if (delta >= 0)
+            {
+                _requestsPerSecond = delta / elapsed;
+            }
+        }
+        _prevTotalRequests = newData.OTelMetrics.TotalRequests;
+        _prevUpdateTime = now;
+
+        // Calculate failed requests
+        _failedRequests = newData.GrainStats.Sum(g => g.FailedRequests);
+
+        _data = newData;
+    }
+
+    private void SelectGrainByType(string grainType)
+    {
+        SelectedGrainType = SelectedGrainType == grainType ? null : grainType;
+    }
+
+    private void ClearSelection()
+    {
+        SelectedGrainType = null;
+    }
+
+    private void ToggleSiloPanel()
+    {
+        _silosExpanded = !_silosExpanded;
+    }
+
+    private bool IsSiloSelected(string address) => _allSilosSelected || _selectedSiloAddresses.Contains(address);
+
+    private void ToggleSiloSelection(string address)
+    {
+        if (_allSilosSelected)
+        {
+            // First click when all are selected - deselect this one, select all others
+            _allSilosSelected = false;
+            _selectedSiloAddresses.Clear();
+            foreach (var silo in _data.Silos)
+            {
+                if (silo.Address != address)
+                    _selectedSiloAddresses.Add(silo.Address);
+            }
+        }
+        else if (_selectedSiloAddresses.Contains(address))
+        {
+            // Currently selected - deselect it
+            _selectedSiloAddresses.Remove(address);
+            // If none selected, revert to all selected
+            if (_selectedSiloAddresses.Count == 0)
+            {
+                _allSilosSelected = true;
+            }
+        }
+        else
+        {
+            // Currently not selected - select it
+            _selectedSiloAddresses.Add(address);
+            // If all are now selected, switch to "all" mode
+            if (_selectedSiloAddresses.Count == _data.Silos.Count)
+            {
+                _allSilosSelected = true;
+                _selectedSiloAddresses.Clear();
+            }
+        }
+    }
+
+    private void SelectAllSilos()
+    {
+        _allSilosSelected = true;
+        _selectedSiloAddresses.Clear();
+    }
+
+    private void SortBy(string column)
+    {
+        if (_sortColumn == column)
+        {
+            _sortDescending = !_sortDescending;
+        }
+        else
+        {
+            _sortColumn = column;
+            _sortDescending = column != "Grain";
+        }
+    }
+
+    private MarkupString SortIndicator(string column)
+    {
+        if (_sortColumn != column)
+            return new MarkupString("<span class=\"sort-arrow muted\">&#x2195;</span>");
+
+        return _sortDescending
+            ? new MarkupString("<span class=\"sort-arrow\">&#x2193;</span>")
+            : new MarkupString("<span class=\"sort-arrow\">&#x2191;</span>");
+    }
+
+    private IEnumerable<GrainStatsSummaryViewModel> GetSortedGrainStats()
+    {
+        // Filter and aggregate by selected silos
+        var filtered = GetFilteredGrainStats();
+
+        var sorted = _sortColumn switch
+        {
+            "Grain" => _sortDescending
+                ? filtered.OrderByDescending(g => GetShortTypeName(g.GrainType))
+                : filtered.OrderBy(g => GetShortTypeName(g.GrainType)),
+            "Activations" => _sortDescending
+                ? filtered.OrderByDescending(g => g.TotalActivations)
+                : filtered.OrderBy(g => g.TotalActivations),
+            "ExceptionRate" => _sortDescending
+                ? filtered.OrderByDescending(g => g.ExceptionRate)
+                : filtered.OrderBy(g => g.ExceptionRate),
+            "Throughput" => _sortDescending
+                ? filtered.OrderByDescending(g => g.RequestsPerSecond)
+                : filtered.OrderBy(g => g.RequestsPerSecond),
+            "Latency" => _sortDescending
+                ? filtered.OrderByDescending(g => g.AverageLatencyMs)
+                : filtered.OrderBy(g => g.AverageLatencyMs),
+            _ => filtered.OrderByDescending(g => g.TotalActivations)
+        };
+
+        return sorted.Take(20);
+    }
+
+    /// <summary>
+    /// Filters grain stats by selected silos and recalculates aggregated metrics.
+    /// </summary>
+    private List<GrainStatsSummaryViewModel> GetFilteredGrainStats()
+    {
+        // If all silos selected, return original data
+        if (_allSilosSelected)
+            return _data.GrainStats;
+
+        // No silos selected - return empty
+        if (_selectedSiloAddresses.Count == 0)
+            return [];
+
+        var result = new List<GrainStatsSummaryViewModel>();
+
+        // Filter and re-aggregate based on selected silos
+        foreach (var grain in _data.GrainStats)
+        {
+            // If no per-silo data available, include grain with original values
+            if (grain.PerSiloStats == null || grain.PerSiloStats.Count == 0)
+            {
+                result.Add(grain);
+                continue;
+            }
+
+            // Get stats for selected silos only
+            var selectedStats = grain.PerSiloStats
+                .Where(kvp => _selectedSiloAddresses.Contains(kvp.Key))
+                .Select(kvp => kvp.Value)
+                .ToList();
+
+            // If no matching silos found, skip this grain in filtered results
+            if (selectedStats.Count == 0)
+                continue;
+
+            // Aggregate metrics from selected silos
+            var totalRequests = selectedStats.Sum(s => s.TotalRequests);
+            var failedRequests = selectedStats.Sum(s => s.FailedRequests);
+            var avgLatency = totalRequests > 0
+                ? selectedStats.Sum(s => s.AverageLatencyMs * s.TotalRequests) / totalRequests
+                : 0;
+            var rps = selectedStats.Sum(s => s.RequestsPerSecond);
+            var exceptionRate = totalRequests > 0 ? (failedRequests / (double)totalRequests) * 100 : 0;
+
+            // Estimate activations based on request proportion
+            var allSiloRequests = grain.PerSiloStats.Values.Sum(s => s.TotalRequests);
+            var requestProportion = allSiloRequests > 0 ? (double)totalRequests / allSiloRequests : 0;
+            var estimatedActivations = (int)Math.Round(grain.TotalActivations * requestProportion);
+
+            result.Add(new GrainStatsSummaryViewModel
+            {
+                GrainType = grain.GrainType,
+                TotalActivations = estimatedActivations,
+                SiloCount = selectedStats.Count,
+                RequestsPerSecond = rps,
+                AverageLatencyMs = avgLatency,
+                ExceptionRate = exceptionRate,
+                TotalRequests = totalRequests,
+                FailedRequests = failedRequests,
+                PerSiloStats = grain.PerSiloStats
+            });
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Gets filtered activation count based on selected silos.
+    /// </summary>
+    private long GetFilteredActivations()
+    {
+        if (_allSilosSelected)
+            return _data.OTelMetrics.TotalActivations;
+
+        // Sum activations from selected silos only
+        return _data.Silos
+            .Where(s => _selectedSiloAddresses.Contains(s.Address))
+            .Sum(s => s.ActivationCount);
+    }
+
+    /// <summary>
+    /// Gets filtered total requests based on selected silos.
+    /// </summary>
+    private long GetFilteredTotalRequests()
+    {
+        if (_allSilosSelected)
+            return _data.OTelMetrics.TotalRequests;
+
+        // Sum requests from filtered grain stats
+        return GetFilteredGrainStats().Sum(g => g.TotalRequests);
+    }
+
+    /// <summary>
+    /// Gets filtered average latency based on selected silos.
+    /// </summary>
+    private double GetFilteredAvgLatency()
+    {
+        if (_allSilosSelected)
+            return _data.OTelMetrics.AverageRequestLatencyMs;
+
+        var filtered = GetFilteredGrainStats();
+        var totalRequests = filtered.Sum(g => g.TotalRequests);
+        if (totalRequests == 0) return 0;
+
+        // Weighted average by request count
+        return filtered.Sum(g => g.AverageLatencyMs * g.TotalRequests) / totalRequests;
+    }
+
+    /// <summary>
+    /// Returns silos sorted consistently by address to prevent jumping.
+    /// </summary>
+    private IEnumerable<SiloSummaryViewModel> GetOrderedSilos()
+    {
+        return _data.Silos.OrderBy(s => s.Address);
+    }
+
+    private static string FormatNumber(long value)
+    {
+        if (value >= 1_000_000) return $"{value / 1_000_000.0:F1}M";
+        if (value >= 1_000) return $"{value / 1_000.0:F1}K";
+        return value.ToString();
+    }
+
+    private static string FormatMemory(long mb) => mb >= 1024
+        ? $"{mb / 1024.0:F1} GB"
+        : $"{mb} MB";
+
+    private static string GetShortTypeName(string fullName, int maxLength = 35)
+    {
+        if (string.IsNullOrEmpty(fullName)) return fullName;
+
+        var span = fullName.AsSpan();
+
+        // Strip assembly info (everything after comma)
+        var commaIdx = span.IndexOf(',');
+        if (commaIdx >= 0)
+            span = span[..commaIdx];
+
+        // Strip generic arity markers like `1
+        var backTickIdx = span.IndexOf('`');
+        if (backTickIdx >= 0)
+            span = span[..backTickIdx];
+
+        // Get the last segment after the final dot
+        var lastDot = span.LastIndexOf('.');
+        if (lastDot >= 0)
+            span = span[(lastDot + 1)..];
+
+        // Handle nested types (e.g., "OuterType+InnerType")
+        var plusIdx = span.IndexOf('+');
+        if (plusIdx >= 0)
+            span = span[..plusIdx];
+
+        if (span.Length > maxLength)
+            return string.Concat(span[..maxLength], "...");
+
+        return span.ToString();
+    }
+
+    private static string GetSiloDisplayName(string address)
+    {
+        if (string.IsNullOrEmpty(address)) return "-";
+        var atIndex = address.IndexOf('@');
+        if (atIndex > 0)
+        {
+            var host = address[(atIndex + 1)..];
+            var colonIndex = host.IndexOf(':');
+            if (colonIndex > 0) host = host[..colonIndex];
+            return host.Length > 15 ? $"...{host[^12..]}" : host;
+        }
+        return address.Length > 15 ? $"...{address[^12..]}" : address;
+    }
+
+    private static string GetCpuColorClass(double cpuPercent) => cpuPercent switch
+    {
+        > 90 => "text-danger",
+        > 75 => "text-warning",
+        _ => ""
+    };
+
+    private static string FormatActivations(int activations) =>
+        activations > 0 ? activations.ToString("N0") : "-";
+
+    public async ValueTask DisposeAsync()
+    {
+        DataService.OnConnectionStateChanged -= OnConnectionStateChanged;
+        DataService.OnOrleansDataReceived -= OnOrleansDataReceived;
+
+        try
+        {
+            await DataService.UnsubscribeFromPage(ClientDashboardPages.Orleans);
+        }
+        catch { }
+
+        GC.SuppressFinalize(this);
+    }
+}

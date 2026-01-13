@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk.Razor">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+
+    <!-- Package metadata -->
+    <PackageId>Orleans.Insights.Dashboard</PackageId>
+    <Version>1.0.0</Version>
+    <Authors>Orleans.Insights Contributors</Authors>
+    <Description>Server-side components for Orleans.Insights dashboard including SignalR hub and OpenTelemetry metrics listener.</Description>
+    <PackageTags>orleans;dashboard;monitoring;signalr;blazor</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/orleans-insights/Orleans.Insights</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/orleans-insights/Orleans.Insights</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <SupportedPlatform Include="browser" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Orleans.Insights\Orleans.Insights.csproj" />
+    <ProjectReference Include="..\Orleans.Insights.Dashboard.Client\Orleans.Insights.Dashboard.Client.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly.Server" Version="10.0.1" />
+    <PackageReference Include="Microsoft.AspNetCore.SignalR" Version="1.2.9" />
+    <PackageReference Include="Microsoft.Extensions.Diagnostics" Version="10.0.1" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.14.0" />
+  </ItemGroup>
+
+</Project>

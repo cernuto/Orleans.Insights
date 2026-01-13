@@ -1,0 +1,245 @@
+@* Method profiling chart using chartjs-plugin-streaming *@
+@* Uses SignalR service for WASM compatibility *@
+@using Microsoft.JSInterop
+@implements IAsyncDisposable
+@inject IDashboardDataService DataService
+@inject IJSRuntime JS
+
+<div class="method-profile-chart">
+    <canvas id="@_canvasId"></canvas>
+</div>
+
+<style>
+    .method-profile-chart {
+        contain: layout style paint;
+        height: 118px;
+        width: 100%;
+    }
+    .method-profile-chart canvas {
+        width: 100% !important;
+        height: 100% !important;
+    }
+</style>
+
+@code {
+    [Parameter] public string MethodName { get; set; } = "";
+    [Parameter] public string GrainType { get; set; } = "";
+
+    private string _canvasId = "";
+    private string _curMethod = "";
+    private string _curGrain = "";
+    private bool _chartCreated;
+    private bool _disposed;
+    private DotNetObjectReference<MethodProfileChart>? _dotNetRef;
+    private DateTime _lastSampleTimestamp = DateTime.MinValue;
+
+    // Cache latest trend data from service
+    private List<TrendPoint> _trendData = [];
+
+    protected override void OnInitialized()
+    {
+        _canvasId = $"streaming-chart-{Guid.NewGuid():N}";
+        _curMethod = MethodName;
+        _curGrain = GrainType;
+    }
+
+    // Prevent re-renders - chart updates via JS onRefresh, not Blazor
+    protected override bool ShouldRender() => !_chartCreated;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender && !_disposed)
+        {
+            _dotNetRef = DotNetObjectReference.Create(this);
+
+            // Load initial trend data from service
+            await LoadTrendDataAsync();
+
+            await CreateChartAsync();
+        }
+    }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        var methodChanged = _curMethod != MethodName || _curGrain != GrainType;
+
+        if (methodChanged && _chartCreated)
+        {
+            _curMethod = MethodName;
+            _curGrain = GrainType;
+            _lastSampleTimestamp = DateTime.MinValue;
+
+            // Reload data for new method
+            await LoadTrendDataAsync();
+
+            // Recreate chart for new method
+            await DestroyChartAsync();
+            await CreateChartAsync();
+        }
+    }
+
+    private async Task LoadTrendDataAsync()
+    {
+        if (_disposed) return;
+
+        try
+        {
+            var json = await DataService.GetMethodProfileTrendAsync(
+                GrainType,
+                MethodName,
+                TimeSpan.FromSeconds(60),
+                bucketSeconds: 1);
+
+            _trendData = ParseTrendData(json);
+        }
+        catch
+        {
+            _trendData = [];
+        }
+    }
+
+    private static List<TrendPoint> ParseTrendData(System.Text.Json.JsonElement json)
+    {
+        var result = new List<TrendPoint>();
+        if (json.ValueKind != System.Text.Json.JsonValueKind.Array)
+            return result;
+
+        foreach (var item in json.EnumerateArray())
+        {
+            result.Add(new TrendPoint
+            {
+                Timestamp = item.TryGetProperty("timestamp", out var ts) && ts.TryGetDateTime(out var dt) ? dt : DateTime.UtcNow,
+                CallsPerSecond = item.TryGetProperty("callsPerSecond", out var cps) ? cps.GetDouble() : 0,
+                ExceptionCount = item.TryGetProperty("exceptionCount", out var ec) ? ec.GetInt32() : 0,
+                AvgLatencyMs = item.TryGetProperty("avgLatencyMs", out var lat) ? lat.GetDouble() : 0
+            });
+        }
+
+        return result;
+    }
+
+    private async Task CreateChartAsync()
+    {
+        if (_disposed || _dotNetRef == null) return;
+
+        try
+        {
+            var key = $"{GrainType}::{MethodName}";
+            _chartCreated = await JS.InvokeAsync<bool>("streamingChart.create", _canvasId, _dotNetRef, key);
+
+            if (_chartCreated)
+            {
+                // Load historical data to backfill the chart
+                var historicalData = GetHistoricalData();
+                if (historicalData.Count > 0)
+                {
+                    await JS.InvokeVoidAsync("streamingChart.loadHistorical", _canvasId, historicalData);
+                }
+            }
+        }
+        catch (JSException)
+        {
+            // Ignore JS errors during disposal
+        }
+    }
+
+    private async Task DestroyChartAsync()
+    {
+        if (_chartCreated)
+        {
+            try
+            {
+                await JS.InvokeVoidAsync("streamingChart.destroy", _canvasId);
+            }
+            catch { }
+            _chartCreated = false;
+        }
+    }
+
+    /// <summary>
+    /// Called by JavaScript onRefresh every second to get the latest data point.
+    /// Returns zeros if no new activity - charts should show zero, not gaps.
+    /// </summary>
+    [JSInvokable]
+    public async Task<DataPoint> GetLatestDataPoint()
+    {
+        if (_disposed) return new DataPoint { Requests = 0, Failed = 0, Latency = 0 };
+
+        // Refresh trend data from service
+        await LoadTrendDataAsync();
+
+        if (_trendData.Count == 0)
+            return new DataPoint { Requests = 0, Failed = 0, Latency = 0 };
+
+        // Find the first sample AFTER our last timestamp
+        for (int i = 0; i < _trendData.Count; i++)
+        {
+            var sample = _trendData[i];
+            if (sample.Timestamp > _lastSampleTimestamp)
+            {
+                _lastSampleTimestamp = sample.Timestamp;
+                return new DataPoint
+                {
+                    Requests = sample.CallsPerSecond,
+                    Failed = sample.ExceptionCount,
+                    Latency = sample.AvgLatencyMs
+                };
+            }
+        }
+
+        // No new activity this second - return zeros to show flat baseline
+        return new DataPoint { Requests = 0, Failed = 0, Latency = 0 };
+    }
+
+    private List<DataPoint> GetHistoricalData()
+    {
+        var result = new List<DataPoint>();
+
+        if (_trendData.Count == 0)
+            return result;
+
+        var startIdx = Math.Max(0, _trendData.Count - 60);
+
+        // Take last 60 samples for 60-second history
+        for (int i = startIdx; i < _trendData.Count; i++)
+        {
+            var s = _trendData[i];
+            result.Add(new DataPoint
+            {
+                Requests = s.CallsPerSecond,
+                Failed = s.ExceptionCount,
+                Latency = s.AvgLatencyMs
+            });
+        }
+
+        // Track the latest timestamp so GetLatestDataPoint returns only NEW samples
+        if (_trendData.Count > 0)
+        {
+            _lastSampleTimestamp = _trendData[^1].Timestamp;
+        }
+
+        return result;
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _disposed = true;
+        await DestroyChartAsync();
+        _dotNetRef?.Dispose();
+    }
+
+    private class TrendPoint
+    {
+        public DateTime Timestamp { get; set; }
+        public double CallsPerSecond { get; set; }
+        public int ExceptionCount { get; set; }
+        public double AvgLatencyMs { get; set; }
+    }
+
+    public class DataPoint
+    {
+        public double Requests { get; set; }
+        public double Failed { get; set; }
+        public double Latency { get; set; }
+    }
+}

@@ -1,0 +1,700 @@
+@page "/insights"
+@inject IDashboardDataService DataService
+@inject ILogger<Insights> Logger
+@implements IAsyncDisposable
+
+<div class="page-header">
+    <h1 class="page-title">Insights</h1>
+    <p class="page-subtitle">Deep analytics from InsightsGrain</p>
+    <div class="refresh-indicator">
+        <span class="refresh-dot @(_isConnected ? "" : "loading")"></span>
+        <span>@(_isConnected ? "Live" : "Connecting...")</span>
+    </div>
+</div>
+
+@if (_hasData)
+{
+    <!-- Summary Cards -->
+    <div class="grid-4">
+        <MetricCard Value="@_totalAnomalies.ToString()" Label="Active Anomalies"
+                    ColorClass="@(_totalAnomalies > 0 ? "text-danger" : "text-success")" />
+        <MetricCard Value="@GetReportingSilos()" Label="Reporting Silos" />
+        <MetricCard Value="@GetGrainTypes()" Label="Grain Types" />
+        <MetricCard Value="@GetDbSize()" Label="Analytics DB Size" />
+    </div>
+
+    <!-- Distribution Charts -->
+    @if (_data.TopGrainsByThroughput.Count > 0 || _data.SiloComparisons.Count > 0)
+    {
+        <div class="grid-2">
+            @if (_data.TopGrainsByThroughput.Count > 0)
+            {
+                <div class="card insights-card">
+                    <div class="card-header">
+                        <span class="card-title">Request Distribution</span>
+                    </div>
+                    <PieChart Title="" Data="@GetGrainRequestDistribution()" ShowDonutHole="true" />
+                </div>
+            }
+            @if (_data.SiloComparisons.Count > 1)
+            {
+                <div class="card insights-card">
+                    <div class="card-header">
+                        <span class="card-title">Silo Load Distribution</span>
+                    </div>
+                    <PieChart Title="" Data="@GetSiloLoadDistribution()" ShowDonutHole="true" />
+                </div>
+            }
+        </div>
+    }
+
+    <!-- Anomaly Detection Section -->
+    @if (_data.LatencyAnomalies.Count > 0 || _data.ErrorRateAnomalies.Count > 0)
+    {
+        <div class="card insights-card anomaly-section">
+            <div class="card-header">
+                <span class="card-title">Performance Anomalies</span>
+                <span class="anomaly-badge">@_totalAnomalies detected</span>
+            </div>
+            @if (_data.LatencyAnomalies.Count > 0)
+            {
+                <div class="anomaly-group">
+                    <h4 class="anomaly-group-title">Latency Spikes</h4>
+                    <div class="table-responsive">
+                        <table class="table">
+                            <thead>
+                                <tr>
+                                    <th>Grain / Method</th>
+                                    <th class="text-right">Current</th>
+                                    <th class="text-right">Baseline</th>
+                                    <th class="text-right">Deviation</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var anomaly in _data.LatencyAnomalies.Take(5))
+                                {
+                                    <tr>
+                                        <td>
+                                            <span class="font-mono">@GetShortTypeName(anomaly.GrainType)</span>
+                                            @if (!string.IsNullOrEmpty(anomaly.MethodName))
+                                            {
+                                                <span class="text-muted">.@anomaly.MethodName</span>
+                                            }
+                                        </td>
+                                        <td class="text-right text-danger">@anomaly.CurrentLatencyMs.ToString("F1")ms</td>
+                                        <td class="text-right text-muted">@anomaly.BaselineLatencyMs.ToString("F1")ms</td>
+                                        <td class="text-right">
+                                            <span class="deviation-badge @GetDeviationClass(anomaly.DeviationMultiplier)">
+                                                @anomaly.DeviationMultiplier.ToString("F1")x
+                                            </span>
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            }
+            @if (_data.ErrorRateAnomalies.Count > 0)
+            {
+                <div class="anomaly-group">
+                    <h4 class="anomaly-group-title">Error Rate Spikes</h4>
+                    <div class="table-responsive">
+                        <table class="table">
+                            <thead>
+                                <tr>
+                                    <th>Grain / Method</th>
+                                    <th class="text-right">Current</th>
+                                    <th class="text-right">Baseline</th>
+                                    <th class="text-right">Deviation</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var anomaly in _data.ErrorRateAnomalies.Take(5))
+                                {
+                                    <tr>
+                                        <td>
+                                            <span class="font-mono">@GetShortTypeName(anomaly.GrainType)</span>
+                                            @if (!string.IsNullOrEmpty(anomaly.MethodName))
+                                            {
+                                                <span class="text-muted">.@anomaly.MethodName</span>
+                                            }
+                                        </td>
+                                        <td class="text-right text-danger">@anomaly.CurrentErrorRate.ToString("F2")%</td>
+                                        <td class="text-right text-muted">@anomaly.BaselineErrorRate.ToString("F2")%</td>
+                                        <td class="text-right">
+                                            <span class="deviation-badge @GetDeviationClass(anomaly.DeviationMultiplier)">
+                                                @anomaly.DeviationMultiplier.ToString("F1")x
+                                            </span>
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            }
+        </div>
+    }
+
+    <!-- Top Performers Grid -->
+    <div class="grid-2">
+        <!-- Top Grains by Latency -->
+        <div class="card insights-card">
+            <div class="card-header">
+                <span class="card-title">Slowest Grain Types</span>
+                <span class="refresh-indicator">
+                    <span class="refresh-dot insights-pulse"></span>
+                    <span>15m window</span>
+                </span>
+            </div>
+            @if (_data.TopGrainsByLatency.Count > 0)
+            {
+                <div class="table-responsive">
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>Grain Type</th>
+                                <th class="text-right">Avg Latency</th>
+                                <th class="text-right hide-mobile">Requests</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var grain in _data.TopGrainsByLatency.Take(8))
+                            {
+                                <tr>
+                                    <td class="font-mono">@GetShortTypeName(grain.GrainType)</td>
+                                    <td class="text-right @GetLatencyClass(grain.AverageLatencyMs)">
+                                        @grain.AverageLatencyMs.ToString("F1")ms
+                                    </td>
+                                    <td class="text-right hide-mobile text-muted">@FormatNumber(grain.TotalRequests)</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+            else
+            {
+                <div class="empty-state">No grain data available</div>
+            }
+        </div>
+
+        <!-- Top Grains by Throughput -->
+        <div class="card insights-card">
+            <div class="card-header">
+                <span class="card-title">Busiest Grain Types</span>
+                <span class="refresh-indicator">
+                    <span class="refresh-dot insights-pulse"></span>
+                    <span>15m window</span>
+                </span>
+            </div>
+            @if (_data.TopGrainsByThroughput.Count > 0)
+            {
+                <div class="table-responsive">
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>Grain Type</th>
+                                <th class="text-right">RPS</th>
+                                <th class="text-right hide-mobile">Error Rate</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var grain in _data.TopGrainsByThroughput.Take(8))
+                            {
+                                <tr>
+                                    <td class="font-mono">@GetShortTypeName(grain.GrainType)</td>
+                                    <td class="text-right text-success">@grain.RequestsPerSecond.ToString("F1")</td>
+                                    <td class="text-right hide-mobile @GetErrorRateClass(grain.ErrorRate)">
+                                        @grain.ErrorRate.ToString("F2")%
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+            else
+            {
+                <div class="empty-state">No grain data available</div>
+            }
+        </div>
+    </div>
+
+    <div class="grid-2">
+        <!-- Top Methods by Latency -->
+        <div class="card insights-card">
+            <div class="card-header">
+                <span class="card-title">Slowest Methods</span>
+            </div>
+            @if (_data.TopMethodsByLatency.Count > 0)
+            {
+                <div class="table-responsive">
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>Method</th>
+                                <th class="text-right">Avg Latency</th>
+                                <th class="text-right hide-mobile">Calls</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var method in _data.TopMethodsByLatency.Take(8))
+                            {
+                                <tr>
+                                    <td>
+                                        <span class="font-mono text-muted">@GetShortTypeName(method.GrainType).</span>
+                                        <span class="font-mono">@method.MethodName</span>
+                                    </td>
+                                    <td class="text-right @GetLatencyClass(method.AvgLatencyMs)">
+                                        @method.AvgLatencyMs.ToString("F1")ms
+                                    </td>
+                                    <td class="text-right hide-mobile text-muted">@FormatNumber(method.TotalCalls)</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+            else
+            {
+                <div class="empty-state">No method data available</div>
+            }
+        </div>
+
+        <!-- Top Methods by Exceptions -->
+        <div class="card insights-card">
+            <div class="card-header">
+                <span class="card-title">Most Failing Methods</span>
+            </div>
+            @if (_data.TopMethodsByExceptions.Count > 0)
+            {
+                <div class="table-responsive">
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>Method</th>
+                                <th class="text-right">Exceptions</th>
+                                <th class="text-right hide-mobile">Error Rate</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var method in _data.TopMethodsByExceptions.Take(8))
+                            {
+                                <tr>
+                                    <td>
+                                        <span class="font-mono text-muted">@GetShortTypeName(method.GrainType).</span>
+                                        <span class="font-mono">@method.MethodName</span>
+                                    </td>
+                                    <td class="text-right text-danger">@method.TotalExceptions.ToString("N0")</td>
+                                    <td class="text-right hide-mobile @GetErrorRateClass(method.ExceptionRate)">
+                                        @method.ExceptionRate.ToString("F2")%
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+            else
+            {
+                <div class="empty-state">No method exceptions recorded</div>
+            }
+        </div>
+    </div>
+
+    <!-- Silo Comparison -->
+    @if (_data.SiloComparisons.Count > 0)
+    {
+        <div class="card insights-card">
+            <div class="card-header">
+                <span class="card-title">Silo Performance Comparison</span>
+                <span class="refresh-indicator">
+                    <span class="refresh-dot insights-pulse"></span>
+                    <span>15m window</span>
+                </span>
+            </div>
+            <div class="table-responsive">
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Silo</th>
+                            <th class="text-right">Score</th>
+                            <th class="text-right">CPU</th>
+                            <th class="text-right hide-mobile">Memory</th>
+                            <th class="text-right hide-mobile">Latency</th>
+                            <th class="text-right">RPS</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var silo in _data.SiloComparisons.OrderByDescending(s => s.PerformanceScore))
+                        {
+                            <tr>
+                                <td>
+                                    <span class="font-mono">@silo.HostName</span>
+                                </td>
+                                <td class="text-right">
+                                    <span class="score-badge @GetScoreClass(silo.PerformanceScore)">
+                                        @silo.PerformanceScore.ToString("F0")
+                                    </span>
+                                </td>
+                                <td class="text-right @GetCpuClass(silo.AvgCpuPercent)">
+                                    @silo.AvgCpuPercent.ToString("F0")%
+                                </td>
+                                <td class="text-right hide-mobile text-muted">
+                                    @FormatMemory(silo.AvgMemoryMb)
+                                </td>
+                                <td class="text-right hide-mobile @GetLatencyClass(silo.AvgLatencyMs)">
+                                    @silo.AvgLatencyMs.ToString("F1")ms
+                                </td>
+                                <td class="text-right text-success">
+                                    @silo.RequestsPerSecond.ToString("F1")
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    }
+
+    <!-- Database Health -->
+    @if (_data.DatabaseSummary != null)
+    {
+        <div class="card insights-card">
+            <div class="card-header">
+                <span class="card-title">Analytics Database Health</span>
+            </div>
+            <div class="grid-4" style="padding: 1rem;">
+                <div class="metric-box">
+                    <div class="metric-label">Total Rows</div>
+                    <div class="metric-value">@FormatNumber(_data.DatabaseSummary.TotalRows)</div>
+                </div>
+                <div class="metric-box">
+                    <div class="metric-label">Retention</div>
+                    <div class="metric-value">@FormatRetention(_data.DatabaseSummary.RetentionPeriod)</div>
+                </div>
+                <div class="metric-box">
+                    <div class="metric-label">Unique Methods</div>
+                    <div class="metric-value">@_data.DatabaseSummary.UniqueMethods</div>
+                </div>
+                <div class="metric-box">
+                    <div class="metric-label">Grain Types</div>
+                    <div class="metric-value">@_data.DatabaseSummary.UniqueGrainTypes</div>
+                </div>
+            </div>
+            <div style="padding: 0 1rem 1rem; color: var(--text-muted); font-size: 0.85rem;">
+                Data range: @_data.DatabaseSummary.OldestDataPoint.ToString("MMM dd HH:mm") - @_data.DatabaseSummary.NewestDataPoint.ToString("MMM dd HH:mm")
+            </div>
+        </div>
+    }
+}
+else
+{
+    <div class="card">
+        <div class="loading"><span class="spinner"></span> Loading insights analytics...</div>
+    </div>
+}
+
+<style>
+    .insights-card {
+        border-left: 3px solid var(--orleans-purple);
+    }
+
+    .anomaly-section {
+        border-left-color: var(--danger);
+    }
+
+    .anomaly-badge {
+        background: var(--danger);
+        color: white;
+        padding: 0.25rem 0.5rem;
+        border-radius: var(--radius);
+        font-size: 0.75rem;
+        font-weight: 600;
+    }
+
+    .anomaly-group {
+        padding: 1rem;
+        border-top: 1px solid var(--border);
+    }
+
+    .anomaly-group:first-of-type {
+        border-top: none;
+    }
+
+    .anomaly-group-title {
+        color: var(--text-secondary);
+        font-size: 0.85rem;
+        font-weight: 500;
+        margin-bottom: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+
+    .deviation-badge {
+        display: inline-block;
+        padding: 0.15rem 0.4rem;
+        border-radius: var(--radius);
+        font-weight: 600;
+        font-size: 0.8rem;
+    }
+
+    .deviation-badge.low {
+        background: var(--warning);
+        color: #000;
+    }
+
+    .deviation-badge.medium {
+        background: var(--orleans-orange);
+        color: white;
+    }
+
+    .deviation-badge.high {
+        background: var(--danger);
+        color: white;
+    }
+
+    .score-badge {
+        display: inline-block;
+        padding: 0.2rem 0.5rem;
+        border-radius: var(--radius);
+        font-weight: 600;
+        font-size: 0.85rem;
+    }
+
+    .score-badge.excellent {
+        background: var(--success);
+        color: #000;
+    }
+
+    .score-badge.good {
+        background: var(--orleans-cyan);
+        color: #000;
+    }
+
+    .score-badge.fair {
+        background: var(--warning);
+        color: #000;
+    }
+
+    .score-badge.poor {
+        background: var(--danger);
+        color: white;
+    }
+
+    .insights-pulse {
+        animation: pulse 2s ease-in-out infinite;
+        background-color: var(--orleans-purple);
+    }
+
+    .metric-box {
+        text-align: center;
+        padding: 0.75rem;
+        background: var(--bg-secondary);
+        border-radius: var(--radius);
+    }
+
+    .metric-box .metric-label {
+        font-size: 0.75rem;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin-bottom: 0.25rem;
+    }
+
+    .metric-box .metric-value {
+        font-size: 1.25rem;
+        font-weight: 600;
+        color: var(--text-primary);
+    }
+
+    @@keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.5; }
+    }
+</style>
+
+@code {
+    private InsightsPageViewModel _data = InsightsPageViewModel.Empty;
+    private bool _hasData;
+    private bool _isConnected;
+    private int _totalAnomalies;
+
+    protected override async Task OnInitializedAsync()
+    {
+        DataService.OnConnectionStateChanged += OnConnectionStateChanged;
+        _isConnected = DataService.IsConnected;
+
+        DataService.OnInsightsDataReceived += OnInsightsDataReceived;
+
+        await DataService.StartAsync();
+        await SubscribeAndFetchAsync();
+    }
+
+    private async Task SubscribeAndFetchAsync()
+    {
+        // Wait for connection with timeout
+        if (!DataService.IsConnected)
+        {
+            var connected = await DataService.WaitForConnectionAsync(TimeSpan.FromSeconds(15));
+            if (!connected)
+            {
+                Logger.LogWarning("Timed out waiting for SignalR connection on Insights page");
+                return;
+            }
+        }
+
+        await DataService.SubscribeToPage(ClientDashboardPages.Insights);
+
+        // Fetch initial data immediately so page doesn't show empty
+        try
+        {
+            var data = await DataService.GetInsightsPageDataAsync();
+            if (data.ValueKind != JsonValueKind.Undefined)
+            {
+                _data = InsightsPageViewModel.FromJson(data);
+                _totalAnomalies = _data.LatencyAnomalies.Count + _data.ErrorRateAnomalies.Count;
+                _hasData = true;
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to fetch initial insights data");
+        }
+    }
+
+    private async void OnConnectionStateChanged(bool connected)
+    {
+        _isConnected = connected;
+        await InvokeAsync(StateHasChanged);
+
+        // Re-subscribe and fetch data when connection is restored
+        if (connected)
+        {
+            await SubscribeAndFetchAsync();
+        }
+    }
+
+    private void OnInsightsDataReceived(JsonElement data)
+    {
+        try
+        {
+            _data = InsightsPageViewModel.FromJson(data);
+            _totalAnomalies = _data.LatencyAnomalies.Count + _data.ErrorRateAnomalies.Count;
+            _hasData = true;
+            InvokeAsync(StateHasChanged);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to parse insights data");
+        }
+    }
+
+    // Helper methods
+    private string GetReportingSilos() => _data.DatabaseSummary?.UniqueSilos.ToString() ?? "0";
+    private string GetGrainTypes() => _data.DatabaseSummary?.UniqueGrainTypes.ToString() ?? "0";
+    private string GetDbSize() => _data.DatabaseSummary?.EstimatedSizeFormatted ?? "0 B";
+
+    private static string GetShortTypeName(string fullName)
+    {
+        if (string.IsNullOrEmpty(fullName)) return fullName;
+
+        // Remove the assembly qualifier first (everything after the comma)
+        var commaIndex = fullName.IndexOf(',');
+        if (commaIndex > 0)
+            fullName = fullName[..commaIndex];
+
+        // Then get the class name (after the last dot)
+        var lastDot = fullName.LastIndexOf('.');
+        return lastDot >= 0 ? fullName[(lastDot + 1)..] : fullName;
+    }
+
+    private static string FormatNumber(long value)
+    {
+        if (value >= 1_000_000) return $"{value / 1_000_000.0:F1}M";
+        if (value >= 1_000) return $"{value / 1_000.0:F1}K";
+        return value.ToString();
+    }
+
+    private static string FormatMemory(long mb) => mb >= 1024 ? $"{mb / 1024.0:F1} GB" : $"{mb} MB";
+
+    private static string FormatRetention(TimeSpan retention) => retention.TotalHours >= 24
+        ? $"{retention.TotalDays:F0}d"
+        : $"{retention.TotalHours:F0}h";
+
+    private static string GetDeviationClass(double multiplier) => multiplier switch
+    {
+        >= 5.0 => "high",
+        >= 3.0 => "medium",
+        _ => "low"
+    };
+
+    private static string GetLatencyClass(double ms) => ms switch
+    {
+        > 100 => "text-danger",
+        > 50 => "text-warning",
+        _ => ""
+    };
+
+    private static string GetErrorRateClass(double rate) => rate switch
+    {
+        > 5.0 => "text-danger",
+        > 1.0 => "text-warning",
+        _ => "text-success"
+    };
+
+    private static string GetCpuClass(double cpu) => cpu switch
+    {
+        > 90 => "text-danger",
+        > 75 => "text-warning",
+        _ => ""
+    };
+
+    private static string GetScoreClass(double score) => score switch
+    {
+        >= 80 => "excellent",
+        >= 60 => "good",
+        >= 40 => "fair",
+        _ => "poor"
+    };
+
+    // Pie chart data methods
+    private List<PieChartDataPoint> GetGrainRequestDistribution()
+    {
+        var top = _data.TopGrainsByThroughput.Take(8).ToList();
+        var others = _data.TopGrainsByThroughput.Skip(8).Sum(g => g.TotalRequests);
+
+        var result = top.Select(g => new PieChartDataPoint(
+            GetShortTypeName(g.GrainType),
+            g.TotalRequests)).ToList();
+
+        if (others > 0)
+            result.Add(new PieChartDataPoint("Others", others, "#6c757d"));
+
+        return result;
+    }
+
+    private List<PieChartDataPoint> GetSiloLoadDistribution()
+    {
+        return _data.SiloComparisons.Select(s => new PieChartDataPoint(
+            s.HostName,
+            s.TotalRequests)).ToList();
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        DataService.OnConnectionStateChanged -= OnConnectionStateChanged;
+        DataService.OnInsightsDataReceived -= OnInsightsDataReceived;
+
+        try
+        {
+            await DataService.UnsubscribeFromPage(ClientDashboardPages.Insights);
+        }
+        catch { }
+
+        GC.SuppressFinalize(this);
+    }
+}

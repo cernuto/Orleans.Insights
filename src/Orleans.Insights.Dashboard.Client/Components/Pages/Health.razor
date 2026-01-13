@@ -1,0 +1,236 @@
+@page "/health"
+@inject IDashboardDataService DataService
+@inject ILogger<Health> Logger
+@implements IAsyncDisposable
+
+<div class="page-header">
+    <h1 class="page-title">Health</h1>
+    <div class="refresh-indicator">
+        <span class="refresh-dot @(_isConnected ? "" : "loading")"></span>
+        <span>@(_isConnected ? "Live" : "Connecting...")</span>
+    </div>
+</div>
+
+<div class="grid-3">
+    <MetricCard Value="@_data.HealthyCount.ToString()" Label="Healthy" ColorClass="text-success" />
+    <MetricCard Value="@_data.DegradedCount.ToString()" Label="Degraded" ColorClass="text-warning" />
+    <MetricCard Value="@_data.UnhealthyCount.ToString()" Label="Unhealthy" ColorClass="text-danger" />
+</div>
+
+@if (_data.SiloReports.Count > 0)
+{
+    @foreach (var siloReport in _data.SiloReports)
+    {
+        <div class="card health-card @(GetStatusClass(siloReport.OverallStatus))">
+            <div class="card-header">
+                <div class="health-header-content">
+                    <span class="card-title">@siloReport.HostName</span>
+                    <span class="silo-id font-mono">@siloReport.SiloId</span>
+                </div>
+                <StatusBadge Status="@siloReport.OverallStatus" />
+            </div>
+            <div class="table-responsive">
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Check</th>
+                            <th>Status</th>
+                            <th class="hide-mobile">Description</th>
+                            <th class="text-right hide-mobile">Duration</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var group in GroupChecksByTag(siloReport.Checks))
+                        {
+                            @if (!string.IsNullOrEmpty(group.Key))
+                            {
+                                <tr class="tag-header">
+                                    <td colspan="4">@group.Key</td>
+                                </tr>
+                            }
+                            @foreach (var check in group)
+                            {
+                                <tr>
+                                    <td>@check.Name</td>
+                                    <td><StatusBadge Status="@check.Status" /></td>
+                                    <td class="hide-mobile text-muted">@(check.Description ?? "-")</td>
+                                    <td class="text-right hide-mobile text-muted">
+                                        @(check.DurationMs.HasValue ? $"{check.DurationMs:F1}ms" : "-")
+                                    </td>
+                                </tr>
+                            }
+                        }
+                    </tbody>
+                </table>
+            </div>
+            <div class="health-footer">
+                <span class="text-muted">Last reported: @siloReport.LastReported.ToLocalTime().ToString("HH:mm:ss")</span>
+            </div>
+        </div>
+    }
+}
+else
+{
+    <div class="card">
+        <div class="empty-state">No health data available. Waiting for silos to report...</div>
+    </div>
+}
+
+<style>
+    .health-card {
+        margin-bottom: 1rem;
+    }
+
+    .health-card.status-healthy {
+        border-left: 3px solid var(--success);
+        background: var(--bg-card);
+    }
+
+    .health-card.status-degraded {
+        border-left: 3px solid var(--warning);
+        background: var(--bg-card);
+    }
+
+    .health-card.status-unhealthy {
+        border-left: 3px solid var(--danger);
+        background: var(--bg-card);
+    }
+
+    .health-header-content {
+        display: flex;
+        flex-direction: column;
+        gap: 0.25rem;
+    }
+
+    .silo-id {
+        font-size: 0.8rem;
+        color: var(--text-muted);
+    }
+
+    .health-footer {
+        padding: 0.75rem 1rem;
+        border-top: 1px solid var(--border);
+        font-size: 0.85rem;
+    }
+
+    .tag-header td {
+        background: var(--bg-secondary);
+        font-weight: 600;
+        font-size: 0.8rem;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        color: var(--text-secondary);
+        padding: 0.5rem 1rem;
+    }
+</style>
+
+@code {
+    private HealthPageViewModel _data = HealthPageViewModel.Empty;
+    private bool _isConnected;
+
+    protected override async Task OnInitializedAsync()
+    {
+        // Subscribe to connection state changes
+        DataService.OnConnectionStateChanged += OnConnectionStateChanged;
+        _isConnected = DataService.IsConnected;
+
+        // Subscribe to health data updates
+        DataService.OnHealthDataReceived += OnHealthDataReceived;
+
+        // Start the data service (no-op for server, connects SignalR for WASM)
+        await DataService.StartAsync();
+
+        // Subscribe to health page updates and fetch initial data
+        await SubscribeAndFetchAsync();
+    }
+
+    private async Task SubscribeAndFetchAsync()
+    {
+        // Wait for connection with timeout
+        if (!DataService.IsConnected)
+        {
+            var connected = await DataService.WaitForConnectionAsync(TimeSpan.FromSeconds(15));
+            if (!connected)
+            {
+                Logger.LogWarning("Timed out waiting for SignalR connection on Health page");
+                return;
+            }
+        }
+
+        await DataService.SubscribeToPage(ClientDashboardPages.Health);
+
+        // Fetch initial data immediately so page doesn't show empty
+        try
+        {
+            var data = await DataService.GetHealthPageDataAsync();
+            if (data.ValueKind != JsonValueKind.Undefined)
+            {
+                _data = HealthPageViewModel.FromJson(data);
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to fetch initial health data");
+        }
+    }
+
+    private async void OnConnectionStateChanged(bool connected)
+    {
+        _isConnected = connected;
+        await InvokeAsync(StateHasChanged);
+
+        // Re-subscribe and fetch data when connection is restored
+        if (connected)
+        {
+            await SubscribeAndFetchAsync();
+        }
+    }
+
+    private void OnHealthDataReceived(JsonElement data)
+    {
+        try
+        {
+            _data = HealthPageViewModel.FromJson(data);
+            InvokeAsync(StateHasChanged);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to parse health data");
+        }
+    }
+
+    private static string GetStatusClass(string status) => status switch
+    {
+        "Healthy" => "status-healthy",
+        "Degraded" => "status-degraded",
+        "Unhealthy" => "status-unhealthy",
+        _ => ""
+    };
+
+    private static IEnumerable<IGrouping<string, HealthCheckViewModel>> GroupChecksByTag(List<HealthCheckViewModel> checks)
+    {
+        // Group by tag, with null/empty tags grouped together at the end
+        return checks
+            .GroupBy(c => c.Tag ?? "")
+            .OrderBy(g => string.IsNullOrEmpty(g.Key) ? 1 : 0)
+            .ThenBy(g => g.Key);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        DataService.OnConnectionStateChanged -= OnConnectionStateChanged;
+        DataService.OnHealthDataReceived -= OnHealthDataReceived;
+
+        try
+        {
+            await DataService.UnsubscribeFromPage(ClientDashboardPages.Health);
+        }
+        catch
+        {
+            // Ignore errors during dispose
+        }
+
+        GC.SuppressFinalize(this);
+    }
+}

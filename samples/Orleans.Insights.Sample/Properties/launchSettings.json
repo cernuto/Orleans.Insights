@@ -1,0 +1,13 @@
+{
+  "profiles": {
+    "Orleans.Insights.Sample": {
+      "commandName": "Project",
+      "launchBrowser": true,
+      "launchUrl": "dashboard",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      },
+      "applicationUrl": "https://localhost:50241;http://localhost:50244"
+    }
+  }
+}

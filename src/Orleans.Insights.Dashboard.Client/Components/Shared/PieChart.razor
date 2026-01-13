@@ -1,0 +1,331 @@
+@* SVG-based Pie Chart component for data visualization *@
+
+<div class="pie-chart-container">
+    @if (!string.IsNullOrEmpty(Title))
+    {
+        <h4 class="pie-chart-title">@Title</h4>
+    }
+    <div class="pie-chart-content">
+        <svg viewBox="0 0 @ViewBoxSize @ViewBoxSize" class="pie-chart-svg">
+            <g transform="translate(@Center, @Center)">
+                @foreach (var segment in _segments)
+                {
+                    <path
+                        d="@segment.Path"
+                        fill="@segment.Color"
+                        stroke="var(--bg-card)"
+                        stroke-width="1"
+                        class="pie-segment @(segment.IsHovered ? "hovered" : "")"
+                        @onmouseenter="() => OnSegmentHover(segment)"
+                        @onmouseleave="OnSegmentLeave">
+                        <title>@segment.Label: @segment.Value.ToString(ValueFormat) (@segment.Percentage.ToString("F1")%)</title>
+                    </path>
+                }
+                @if (ShowDonutHole)
+                {
+                    <circle cx="0" cy="0" r="@DonutRadius" fill="var(--bg-card)" />
+                    @if (_hoveredSegment != null)
+                    {
+                        @((MarkupString)$"<text x=\"0\" y=\"-8\" text-anchor=\"middle\" class=\"donut-label\">{_hoveredSegment.Label}</text>")
+                        @((MarkupString)$"<text x=\"0\" y=\"12\" text-anchor=\"middle\" class=\"donut-value\">{_hoveredSegment.Value.ToString(ValueFormat)}</text>")
+                        @((MarkupString)$"<text x=\"0\" y=\"28\" text-anchor=\"middle\" class=\"donut-percent\">{_hoveredSegment.Percentage:F1}%</text>")
+                    }
+                    else if (_segments.Count > 0)
+                    {
+                        @((MarkupString)$"<text x=\"0\" y=\"0\" text-anchor=\"middle\" dominant-baseline=\"middle\" class=\"donut-total\">{_total.ToString(ValueFormat)}</text>")
+                        @((MarkupString)"<text x=\"0\" y=\"20\" text-anchor=\"middle\" class=\"donut-total-label\">Total</text>")
+                    }
+                }
+            </g>
+        </svg>
+        @if (ShowLegend)
+        {
+            <div class="pie-chart-legend">
+                @foreach (var segment in _segments)
+                {
+                    <div class="legend-item @(segment.IsHovered ? "hovered" : "")"
+                         @onmouseenter="() => OnSegmentHover(segment)"
+                         @onmouseleave="OnSegmentLeave">
+                        <span class="legend-color" style="background-color: @segment.Color;"></span>
+                        <span class="legend-label">@segment.Label</span>
+                        <span class="legend-value">@segment.Percentage.ToString("F1")%</span>
+                    </div>
+                }
+            </div>
+        }
+    </div>
+</div>
+
+<style>
+    .pie-chart-container {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        padding: 0.5rem;
+    }
+
+    .pie-chart-title {
+        color: var(--text-secondary);
+        font-size: 0.85rem;
+        font-weight: 500;
+        margin-bottom: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+
+    .pie-chart-content {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+        width: 100%;
+        justify-content: center;
+    }
+
+    .pie-chart-svg {
+        width: 160px;
+        height: 160px;
+        flex-shrink: 0;
+    }
+
+    .pie-segment {
+        cursor: pointer;
+        transition: opacity 0.2s ease, transform 0.2s ease;
+        transform-origin: center;
+    }
+
+    .pie-segment:hover,
+    .pie-segment.hovered {
+        opacity: 0.85;
+        filter: brightness(1.1);
+    }
+
+    .donut-label {
+        fill: var(--text-secondary);
+        font-size: 11px;
+        font-weight: 500;
+    }
+
+    .donut-value {
+        fill: var(--text-primary);
+        font-size: 14px;
+        font-weight: 600;
+    }
+
+    .donut-percent {
+        fill: var(--text-muted);
+        font-size: 10px;
+    }
+
+    .donut-total {
+        fill: var(--text-primary);
+        font-size: 16px;
+        font-weight: 600;
+    }
+
+    .donut-total-label {
+        fill: var(--text-muted);
+        font-size: 10px;
+    }
+
+    .pie-chart-legend {
+        display: flex;
+        flex-direction: column;
+        gap: 0.4rem;
+        max-height: 150px;
+        overflow-y: auto;
+    }
+
+    .legend-item {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.25rem 0.5rem;
+        border-radius: var(--radius);
+        cursor: pointer;
+        transition: background-color 0.2s ease;
+    }
+
+    .legend-item:hover,
+    .legend-item.hovered {
+        background-color: var(--bg-hover);
+    }
+
+    .legend-color {
+        width: 10px;
+        height: 10px;
+        border-radius: 2px;
+        flex-shrink: 0;
+    }
+
+    .legend-label {
+        color: var(--text-secondary);
+        font-size: 0.8rem;
+        flex: 1;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 100px;
+    }
+
+    .legend-value {
+        color: var(--text-muted);
+        font-size: 0.75rem;
+        font-weight: 500;
+    }
+
+    @@media (max-width: 600px) {
+        .pie-chart-content {
+            flex-direction: column;
+        }
+
+        .pie-chart-legend {
+            flex-direction: row;
+            flex-wrap: wrap;
+            justify-content: center;
+            max-height: none;
+        }
+    }
+</style>
+
+@code {
+    [Parameter] public string Title { get; set; } = "";
+    [Parameter] public List<PieChartDataPoint>? Data { get; set; }
+    [Parameter] public bool ShowLegend { get; set; } = true;
+    [Parameter] public bool ShowDonutHole { get; set; } = true;
+    [Parameter] public string ValueFormat { get; set; } = "N0";
+    [Parameter] public int Size { get; set; } = 160;
+
+    private const int ViewBoxSize = 160;
+    private const int Radius = 70;
+    private int Center => ViewBoxSize / 2;
+    private int DonutRadius => ShowDonutHole ? 45 : 0;
+
+    private List<PieSegment> _segments = [];
+    private PieSegment? _hoveredSegment;
+    private double _total;
+
+    // Default color palette matching dashboard theme
+    private static readonly string[] DefaultColors =
+    [
+        "#9b59b6", // Orleans purple
+        "#e67e22", // Orleans orange
+        "#1abc9c", // Teal
+        "#3498db", // Blue
+        "#f1c40f", // Yellow
+        "#e74c3c", // Red
+        "#2ecc71", // Green
+        "#95a5a6", // Gray
+        "#8e44ad", // Dark purple
+        "#d35400"  // Dark orange
+    ];
+
+    protected override void OnParametersSet()
+    {
+        BuildSegments();
+    }
+
+    private void BuildSegments()
+    {
+        _segments.Clear();
+
+        if (Data == null || Data.Count == 0)
+            return;
+
+        _total = Data.Sum(d => d.Value);
+        if (_total <= 0)
+            return;
+
+        double currentAngle = -90; // Start from top
+
+        for (int i = 0; i < Data.Count; i++)
+        {
+            var dataPoint = Data[i];
+            var percentage = (dataPoint.Value / _total) * 100;
+            var sweepAngle = (dataPoint.Value / _total) * 360;
+
+            // Skip very small segments
+            if (sweepAngle < 0.5)
+                continue;
+
+            var color = !string.IsNullOrEmpty(dataPoint.Color)
+                ? dataPoint.Color
+                : DefaultColors[i % DefaultColors.Length];
+
+            var path = CreateArcPath(currentAngle, sweepAngle);
+
+            _segments.Add(new PieSegment
+            {
+                Label = dataPoint.Label,
+                Value = dataPoint.Value,
+                Percentage = percentage,
+                Color = color,
+                Path = path
+            });
+
+            currentAngle += sweepAngle;
+        }
+    }
+
+    private string CreateArcPath(double startAngle, double sweepAngle)
+    {
+        var innerRadius = DonutRadius;
+        var outerRadius = Radius;
+
+        // Convert angles to radians
+        var startRad = startAngle * Math.PI / 180;
+        var endRad = (startAngle + sweepAngle) * Math.PI / 180;
+
+        // Calculate points
+        var x1 = Math.Cos(startRad) * outerRadius;
+        var y1 = Math.Sin(startRad) * outerRadius;
+        var x2 = Math.Cos(endRad) * outerRadius;
+        var y2 = Math.Sin(endRad) * outerRadius;
+
+        var largeArc = sweepAngle > 180 ? 1 : 0;
+
+        if (ShowDonutHole)
+        {
+            // Donut segment
+            var x3 = Math.Cos(endRad) * innerRadius;
+            var y3 = Math.Sin(endRad) * innerRadius;
+            var x4 = Math.Cos(startRad) * innerRadius;
+            var y4 = Math.Sin(startRad) * innerRadius;
+
+            return $"M {x1:F2} {y1:F2} " +
+                   $"A {outerRadius} {outerRadius} 0 {largeArc} 1 {x2:F2} {y2:F2} " +
+                   $"L {x3:F2} {y3:F2} " +
+                   $"A {innerRadius} {innerRadius} 0 {largeArc} 0 {x4:F2} {y4:F2} Z";
+        }
+        else
+        {
+            // Full pie segment
+            return $"M 0 0 L {x1:F2} {y1:F2} " +
+                   $"A {outerRadius} {outerRadius} 0 {largeArc} 1 {x2:F2} {y2:F2} Z";
+        }
+    }
+
+    private void OnSegmentHover(PieSegment segment)
+    {
+        foreach (var s in _segments)
+            s.IsHovered = false;
+        segment.IsHovered = true;
+        _hoveredSegment = segment;
+    }
+
+    private void OnSegmentLeave()
+    {
+        foreach (var s in _segments)
+            s.IsHovered = false;
+        _hoveredSegment = null;
+    }
+
+    private class PieSegment
+    {
+        public string Label { get; set; } = "";
+        public double Value { get; set; }
+        public double Percentage { get; set; }
+        public string Color { get; set; } = "";
+        public string Path { get; set; } = "";
+        public bool IsHovered { get; set; }
+    }
+}

@@ -1,0 +1,52 @@
+@*
+    Orleans.Insights Dashboard Routes
+    Authentication is optional - configure in host application if needed.
+*@
+
+<Router AppAssembly="@typeof(Routes).Assembly"
+        AdditionalAssemblies="new[] { typeof(Health).Assembly }">
+    <Found Context="routeData">
+        <RouteView RouteData="@routeData" DefaultLayout="@typeof(Layout.MainLayout)" />
+        <FocusOnNavigate RouteData="@routeData" Selector="h1" />
+    </Found>
+    <NotFound>
+        <LayoutView Layout="@typeof(Layout.MainLayout)">
+            <div class="not-found">
+                <h1>404</h1>
+                <p>Page not found</p>
+                <a href="">Return to Dashboard</a>
+            </div>
+        </LayoutView>
+    </NotFound>
+</Router>
+
+<style>
+    .not-found {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        height: 60vh;
+        text-align: center;
+    }
+
+    .not-found h1 {
+        font-size: 4rem;
+        color: var(--orleans-purple, #68217a);
+        margin-bottom: 0.5rem;
+    }
+
+    .not-found p {
+        color: var(--text-muted);
+        margin-bottom: 1.5rem;
+    }
+
+    .not-found a {
+        color: var(--orleans-purple, #68217a);
+        text-decoration: none;
+    }
+
+    .not-found a:hover {
+        text-decoration: underline;
+    }
+</style>

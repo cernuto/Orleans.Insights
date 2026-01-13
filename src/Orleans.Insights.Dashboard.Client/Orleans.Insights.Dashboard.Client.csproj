@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk.BlazorWebAssembly">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+
+    <!-- Set the base path for static web assets - this is the sub-path where the dashboard will be hosted -->
+    <StaticWebAssetBasePath>dashboard</StaticWebAssetBasePath>
+
+    <!-- Package metadata -->
+    <PackageId>Orleans.Insights.Dashboard.Client</PackageId>
+    <Version>1.0.0</Version>
+    <Authors>Orleans.Insights Contributors</Authors>
+    <Description>Blazor WebAssembly client for Orleans.Insights dashboard with real-time cluster monitoring UI.</Description>
+    <PackageTags>orleans;dashboard;monitoring;blazor;wasm</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/orleans-insights/Orleans.Insights</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/orleans-insights/Orleans.Insights</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly" Version="10.0.1" />
+    <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" Version="10.0.1" />
+    <PackageReference Include="Microsoft.Extensions.FileProviders.Embedded" Version="10.0.1" />
+  </ItemGroup>
+
+
+</Project>

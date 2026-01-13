@@ -1,0 +1,198 @@
+@page "/"
+@page "/overview"
+@inject IDashboardDataService DataService
+@inject ILogger<Overview> Logger
+@implements IAsyncDisposable
+
+<div class="page-header">
+    <h1 class="page-title">Orleans.Insights</h1>
+    <div class="refresh-indicator">
+        <span class="refresh-dot @(_isConnected ? "" : "loading")"></span>
+        <span>@(_isConnected ? "Live" : "Connecting...")</span>
+    </div>
+</div>
+
+<div class="grid-4">
+    <MetricCard Value="@_data.SiloCount.ToString()" Label="Active Silos" ColorClass="text-success" />
+    <MetricCard Value="@_data.TotalGrains.ToString("N0")" Label="Grain Activations" />
+    <MetricCard Value="@_data.HealthyEndpoints.ToString()" Label="Healthy Endpoints"
+                ColorClass="@(_data.UnhealthyEndpoints > 0 ? "text-danger" : "text-success")" />
+    <MetricCard Value="@FormatMemory(_data.MemoryUsedMb)" Label="Memory Usage" />
+</div>
+
+<div class="grid-2">
+    <div class="card">
+        <div class="card-header">
+            <span class="card-title">Health Status</span>
+        </div>
+        @if (_data.HealthEndpoints.Count > 0)
+        {
+            <div class="table-responsive">
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Endpoint</th>
+                            <th>Status</th>
+                            <th class="text-right">Checks</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var endpoint in _data.HealthEndpoints)
+                        {
+                            <tr>
+                                <td>@endpoint.Name</td>
+                                <td><StatusBadge Status="@endpoint.OverallStatus" /></td>
+                                <td class="text-right text-muted">@endpoint.CheckCount</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+        else
+        {
+            <div class="empty-state">No health data</div>
+        }
+    </div>
+
+    <div class="card">
+        <div class="card-header">
+            <span class="card-title">Cluster Status</span>
+        </div>
+        @if (_data.Silos.Count > 0)
+        {
+            <div class="table-responsive">
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Silo</th>
+                            <th>Status</th>
+                            <th class="text-right">Grains</th>
+                            <th class="text-right hide-mobile">CPU</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var silo in _data.Silos.Take(5))
+                        {
+                            <tr>
+                                <td class="font-mono">@TruncateAddress(silo.Address)</td>
+                                <td><StatusBadge Status="@(silo.Status == "Active" ? "Healthy" : "Degraded")" /></td>
+                                <td class="text-right">@silo.ActivationCount.ToString("N0")</td>
+                                <td class="text-right hide-mobile">@silo.CpuUsage.ToString("F0")%</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+        else
+        {
+            <div class="empty-state">No cluster data</div>
+        }
+    </div>
+</div>
+
+@code {
+    private OverviewPageViewModel _data = OverviewPageViewModel.Empty;
+    private bool _isConnected;
+
+    protected override async Task OnInitializedAsync()
+    {
+        DataService.OnConnectionStateChanged += OnConnectionStateChanged;
+        _isConnected = DataService.IsConnected;
+
+        DataService.OnOverviewDataReceived += OnOverviewDataReceived;
+
+        await DataService.StartAsync();
+        await SubscribeAndFetchAsync();
+    }
+
+    private async Task SubscribeAndFetchAsync()
+    {
+        // Wait for connection with timeout
+        if (!DataService.IsConnected)
+        {
+            var connected = await DataService.WaitForConnectionAsync(TimeSpan.FromSeconds(15));
+            if (!connected)
+            {
+                Logger.LogWarning("Timed out waiting for SignalR connection on Overview page");
+                return;
+            }
+        }
+
+        await DataService.SubscribeToPage(ClientDashboardPages.Overview);
+
+        // Fetch initial data immediately so page doesn't show empty
+        try
+        {
+            var data = await DataService.GetOverviewPageDataAsync();
+            if (data.ValueKind != JsonValueKind.Undefined)
+            {
+                _data = OverviewPageViewModel.FromJson(data);
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to fetch initial overview data");
+        }
+    }
+
+    private async void OnConnectionStateChanged(bool connected)
+    {
+        _isConnected = connected;
+        await InvokeAsync(StateHasChanged);
+
+        // Re-subscribe and fetch data when connection is restored
+        if (connected)
+        {
+            await SubscribeAndFetchAsync();
+        }
+    }
+
+    private void OnOverviewDataReceived(JsonElement data)
+    {
+        try
+        {
+            _data = OverviewPageViewModel.FromJson(data);
+            InvokeAsync(StateHasChanged);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to parse overview data");
+        }
+    }
+
+    private static string FormatMemory(long mb)
+    {
+        if (mb >= 1024) return $"{mb / 1024.0:F1} GB";
+        return $"{mb} MB";
+    }
+
+    private static string TruncateAddress(string address)
+    {
+        if (string.IsNullOrEmpty(address)) return "-";
+        var parts = address.Split('@');
+        if (parts.Length > 1)
+        {
+            var hostPart = parts[1];
+            if (hostPart.Length > 20)
+                return $"...{hostPart[^15..]}";
+        }
+        return address.Length > 20 ? $"...{address[^15..]}" : address;
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        DataService.OnConnectionStateChanged -= OnConnectionStateChanged;
+        DataService.OnOverviewDataReceived -= OnOverviewDataReceived;
+
+        try
+        {
+            await DataService.UnsubscribeFromPage(ClientDashboardPages.Overview);
+        }
+        catch { }
+
+        GC.SuppressFinalize(this);
+    }
+}

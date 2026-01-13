@@ -1,0 +1,111 @@
+@inherits LayoutComponentBase
+@inject NavigationManager NavigationManager
+@inject IDashboardDataService DataService
+
+<div class="dashboard @(_sidebarCollapsed ? "sidebar-collapsed" : "") @(_sidebarOpen ? "sidebar-open" : "")">
+    @* Mobile header with hamburger menu *@
+    <header class="mobile-header">
+        <button class="hamburger-btn" @onclick="ToggleSidebar" aria-label="Toggle navigation">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                @if (_sidebarOpen)
+                {
+                    <line x1="18" y1="6" x2="6" y2="18"/>
+                    <line x1="6" y1="6" x2="18" y2="18"/>
+                }
+                else
+                {
+                    <line x1="3" y1="6" x2="21" y2="6"/>
+                    <line x1="3" y1="12" x2="21" y2="12"/>
+                    <line x1="3" y1="18" x2="21" y2="18"/>
+                }
+            </svg>
+        </button>
+        <div class="mobile-logo">
+            <span class="logo-text">Orleans.Insights</span>
+        </div>
+    </header>
+
+    @* Overlay for mobile when sidebar is open *@
+    @if (_sidebarOpen)
+    {
+        <div class="sidebar-overlay" @onclick="CloseSidebar"></div>
+    }
+
+    <aside class="sidebar">
+        <div class="sidebar-header">
+            <div class="logo">
+                <span class="logo-text">Orleans.Insights</span>
+            </div>
+            <button type="button" class="collapse-btn" @onclick="ToggleCollapse" @onclick:preventDefault="true" @onclick:stopPropagation="true" title="@(_sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar")">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="3" y1="6" x2="21" y2="6"/>
+                    <line x1="3" y1="12" x2="21" y2="12"/>
+                    <line x1="3" y1="18" x2="21" y2="18"/>
+                </svg>
+            </button>
+        </div>
+        <div class="connection-indicator @(DataService.IsConnected ? "connected" : "disconnected")">
+            <span class="status-dot"></span>
+            <span class="connection-text">@(DataService.IsConnected ? "Connected" : "Disconnected")</span>
+        </div>
+        <nav>
+            <NavLink class="nav-item" href="" Match="NavLinkMatch.All" @onclick="CloseSidebar" title="Overview">
+                <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="3" y="3" width="7" height="7" rx="1"/>
+                    <rect x="14" y="3" width="7" height="7" rx="1"/>
+                    <rect x="3" y="14" width="7" height="7" rx="1"/>
+                    <rect x="14" y="14" width="7" height="7" rx="1"/>
+                </svg>
+                <span class="nav-text">Overview</span>
+            </NavLink>
+            <NavLink class="nav-item" href="health" @onclick="CloseSidebar" title="Health">
+                <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
+                </svg>
+                <span class="nav-text">Health</span>
+            </NavLink>
+            <NavLink class="nav-item" href="orleans" @onclick="CloseSidebar" title="Grains">
+                <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="8" r="4"/>
+                    <circle cx="4" cy="18" r="3"/>
+                    <circle cx="20" cy="18" r="3"/>
+                    <line x1="12" y1="12" x2="4" y2="15"/>
+                    <line x1="12" y1="12" x2="20" y2="15"/>
+                </svg>
+                <span class="nav-text">Grains</span>
+            </NavLink>
+            <NavLink class="nav-item" href="insights" @onclick="CloseSidebar" title="Insights">
+                <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="10"/>
+                    <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+                    <line x1="2" y1="12" x2="22" y2="12"/>
+                </svg>
+                <span class="nav-text">Insights</span>
+            </NavLink>
+        </nav>
+    </aside>
+    <main class="main-content">
+        @Body
+    </main>
+</div>
+
+@code {
+    private bool _sidebarOpen;
+    private bool _sidebarCollapsed;
+
+    protected override void OnInitialized()
+    {
+        DataService.OnConnectionStateChanged += OnConnectionChanged;
+    }
+
+    private void OnConnectionChanged(bool connected)
+    {
+        InvokeAsync(StateHasChanged);
+    }
+
+    private void ToggleSidebar() => _sidebarOpen = !_sidebarOpen;
+
+    private void CloseSidebar() => _sidebarOpen = false;
+
+    private void ToggleCollapse() => _sidebarCollapsed = !_sidebarCollapsed;
+}
