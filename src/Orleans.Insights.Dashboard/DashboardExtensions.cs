@@ -1,43 +1,86 @@
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.FileProviders;
+using System.Reflection;
 
 namespace Orleans.Insights.Dashboard;
 
 /// <summary>
 /// Extension methods for configuring the Orleans.Insights dashboard.
 /// </summary>
+/// <remarks>
+/// <para>
+/// <b>Minimal integration:</b>
+/// <code>
+/// var builder = WebApplication.CreateBuilder(args);
+/// builder.UseOrleans(silo => silo.AddOrleansInsights());
+/// builder.Services.AddOrleansInsightsDashboard();
+///
+/// var app = builder.Build();
+/// app.UseStaticFiles();
+/// app.MapOrleansInsightsDashboard();
+/// app.Run();
+/// </code>
+/// </para>
+/// </remarks>
 public static class DashboardExtensions
 {
     /// <summary>
-    /// Adds Orleans.Insights dashboard services.
+    /// Adds Orleans.Insights dashboard services including SignalR.
     /// </summary>
+    /// <param name="services">The service collection.</param>
+    /// <returns>The service collection for chaining.</returns>
     public static IServiceCollection AddOrleansInsightsDashboard(this IServiceCollection services)
     {
-        // Add SignalR
-        services.AddSignalR();
+        // Add SignalR with MessagePack for better performance (optional, falls back to JSON)
+        services.AddSignalR(options =>
+        {
+            options.EnableDetailedErrors = false; // Disable in production for security
+            options.MaximumReceiveMessageSize = 256 * 1024; // 256KB limit for dashboard data
+        });
 
         return services;
     }
 
     /// <summary>
-    /// Maps the Orleans.Insights dashboard endpoints.
+    /// Maps the Orleans.Insights dashboard endpoints at the specified path.
     /// </summary>
-    /// <remarks>
-    /// The dashboard is hosted at the specified path prefix (default: "/dashboard").
-    /// This method should be called after UseStaticFiles() in the middleware pipeline.
-    /// </remarks>
+    /// <param name="app">The endpoint route builder (WebApplication or IEndpointRouteBuilder).</param>
+    /// <param name="pathPrefix">The path prefix for the dashboard (default: "/dashboard").</param>
+    /// <returns>The endpoint route builder for chaining.</returns>
+    /// <example>
+    /// <code>
+    /// app.MapOrleansInsightsDashboard(); // Maps to /dashboard
+    /// app.MapOrleansInsightsDashboard("/monitoring"); // Maps to /monitoring
+    /// </code>
+    /// </example>
+    public static IEndpointRouteBuilder MapOrleansInsightsDashboard(
+        this IEndpointRouteBuilder app,
+        string pathPrefix = "/dashboard")
+    {
+        // Normalize path prefix
+        pathPrefix = NormalizePathPrefix(pathPrefix);
+
+        // Map SignalR hub
+        app.MapHub<Hubs.DashboardHub>($"{pathPrefix}/hub");
+
+        return app;
+    }
+
+    /// <summary>
+    /// Maps the Orleans.Insights dashboard with full static file hosting for Blazor WASM.
+    /// Use this overload when you need the complete dashboard UI.
+    /// </summary>
     /// <param name="app">The web application.</param>
     /// <param name="pathPrefix">The path prefix for the dashboard (default: "/dashboard").</param>
+    /// <returns>The web application for chaining.</returns>
     public static WebApplication MapOrleansInsightsDashboard(
         this WebApplication app,
         string pathPrefix = "/dashboard")
     {
         // Normalize path prefix
-        pathPrefix = pathPrefix.TrimEnd('/');
-        if (!pathPrefix.StartsWith("/"))
-        {
-            pathPrefix = "/" + pathPrefix;
-        }
+        pathPrefix = NormalizePathPrefix(pathPrefix);
 
         // Map SignalR hub at the dashboard path
         app.MapHub<Hubs.DashboardHub>($"{pathPrefix}/hub");
@@ -65,5 +108,23 @@ public static class DashboardExtensions
             });
 
         return app;
+    }
+
+    /// <summary>
+    /// Normalizes the path prefix to ensure it starts with "/" and doesn't end with "/".
+    /// </summary>
+    private static string NormalizePathPrefix(string pathPrefix)
+    {
+        pathPrefix = pathPrefix.Trim();
+
+        if (string.IsNullOrEmpty(pathPrefix))
+            return "/dashboard";
+
+        // Ensure it starts with /
+        if (!pathPrefix.StartsWith('/'))
+            pathPrefix = "/" + pathPrefix;
+
+        // Remove trailing slash
+        return pathPrefix.TrimEnd('/');
     }
 }

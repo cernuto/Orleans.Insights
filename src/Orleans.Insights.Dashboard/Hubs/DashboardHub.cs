@@ -1,31 +1,49 @@
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
-using Orleans;
 using Orleans.Insights.Models;
-using System;
-using System.Collections.Generic;
-using System.Linq;
+using System.Collections.Frozen;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using System.Threading.Tasks;
 
 namespace Orleans.Insights.Dashboard.Hubs;
 
 /// <summary>
 /// SignalR hub for dashboard real-time updates.
-///
-/// WASM clients connect to this hub to:
-/// - Subscribe to page-specific groups (receive updates only for pages they're viewing)
-/// - Receive pushed data when grain observers notify of changes
-/// - Request immediate data fetch (initial load or manual refresh)
 /// </summary>
-public class DashboardHub : Hub
+/// <remarks>
+/// <para>
+/// WASM clients connect to this hub to:
+/// </para>
+/// <list type="bullet">
+/// <item>Subscribe to page-specific groups (receive updates only for pages they're viewing)</item>
+/// <item>Receive pushed data when grain observers notify of changes</item>
+/// <item>Request immediate data fetch (initial load or manual refresh)</item>
+/// </list>
+/// </remarks>
+public sealed class DashboardHub : Hub
 {
     private readonly IClusterClient _clusterClient;
     private readonly IConfiguration _configuration;
     private readonly ILogger<DashboardHub> _logger;
-    private readonly JsonSerializerOptions _jsonOptions;
+
+    // Cached JSON options for serialization
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        Converters = { new JsonStringEnumConverter() }
+    };
+
+    // Frozen set of sensitive configuration keys (fast lookup, thread-safe, allocated once)
+    private static readonly FrozenSet<string> SensitiveKeys = new[]
+    {
+        "ConnectionStrings",
+        "Secret",
+        "Password",
+        "Token",
+        "ApiKey",
+        "ConnectionString"
+    }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
 
     public DashboardHub(
         IClusterClient clusterClient,
@@ -35,30 +53,23 @@ public class DashboardHub : Hub
         _clusterClient = clusterClient;
         _configuration = configuration;
         _logger = logger;
-        _jsonOptions = new JsonSerializerOptions
-        {
-            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-            Converters = { new JsonStringEnumConverter() }
-        };
     }
 
     #region Connection Lifecycle
 
-    public override async Task OnConnectedAsync()
+    public override Task OnConnectedAsync()
     {
-        _logger.LogInformation(
-            "Dashboard client connected: {ConnectionId}",
-            Context.ConnectionId);
-        await base.OnConnectedAsync();
+        _logger.LogInformation("Dashboard client connected: {ConnectionId}", Context.ConnectionId);
+        return base.OnConnectedAsync();
     }
 
-    public override async Task OnDisconnectedAsync(Exception? exception)
+    public override Task OnDisconnectedAsync(Exception? exception)
     {
         _logger.LogInformation(
             "Dashboard client disconnected: {ConnectionId}, Exception: {Exception}",
             Context.ConnectionId,
             exception?.Message);
-        await base.OnDisconnectedAsync(exception);
+        return base.OnDisconnectedAsync(exception);
     }
 
     #endregion
@@ -67,93 +78,130 @@ public class DashboardHub : Hub
 
     /// <summary>
     /// Subscribe to updates for a specific page.
-    /// Client joins a SignalR group named after the page.
-    /// Immediately sends current page data to the caller.
     /// </summary>
     /// <param name="pageName">Page name (health, overview, orleans, insights)</param>
     public async Task SubscribeToPage(string pageName)
     {
-        await Groups.AddToGroupAsync(Context.ConnectionId, pageName.ToLowerInvariant());
-        _logger.LogDebug("Client {ConnectionId} subscribed to page: {Page}", Context.ConnectionId, pageName);
+        var normalizedPage = pageName.ToLowerInvariant();
+        await Groups.AddToGroupAsync(Context.ConnectionId, normalizedPage);
+        _logger.LogDebug("Client {ConnectionId} subscribed to: {Page}", Context.ConnectionId, normalizedPage);
 
-        // Send initial data immediately so the client doesn't wait for first push
+        // Send initial data immediately
         try
         {
-            var data = await GetPageDataAsync(pageName);
+            var data = await GetPageDataAsync(normalizedPage);
             if (data.ValueKind != JsonValueKind.Undefined)
             {
-                await Clients.Caller.SendAsync($"Receive{CapitalizeFirstLetter(pageName)}Data", data);
+                await Clients.Caller.SendAsync($"Receive{CapitalizeFirstLetter(normalizedPage)}Data", data);
             }
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to send initial data for page: {Page}", pageName);
+            _logger.LogWarning(ex, "Failed to send initial data for page: {Page}", normalizedPage);
         }
     }
 
     /// <summary>
     /// Unsubscribe from updates for a specific page.
-    /// Client leaves the SignalR group.
     /// </summary>
-    /// <param name="pageName">Page name to unsubscribe from</param>
     public async Task UnsubscribeFromPage(string pageName)
     {
-        await Groups.RemoveFromGroupAsync(Context.ConnectionId, pageName.ToLowerInvariant());
-        _logger.LogDebug("Client {ConnectionId} unsubscribed from page: {Page}", Context.ConnectionId, pageName);
+        var normalizedPage = pageName.ToLowerInvariant();
+        await Groups.RemoveFromGroupAsync(Context.ConnectionId, normalizedPage);
+        _logger.LogDebug("Client {ConnectionId} unsubscribed from: {Page}", Context.ConnectionId, normalizedPage);
     }
 
     #endregion
 
     #region Data Fetch Methods
 
-    /// <summary>
-    /// Get Health page data immediately.
-    /// </summary>
+    /// <summary>Get Health page data immediately.</summary>
     public async Task<JsonElement> GetHealthPageData()
     {
         var grain = _clusterClient.GetGrain<IInsightsGrain>(IInsightsGrain.SingletonKey);
         var data = await grain.GetHealthPageData();
-        return JsonSerializer.SerializeToElement(data, _jsonOptions);
+        return JsonSerializer.SerializeToElement(data, JsonOptions);
     }
 
-    /// <summary>
-    /// Get Overview page data immediately.
-    /// </summary>
+    /// <summary>Get Overview page data immediately.</summary>
     public async Task<JsonElement> GetOverviewPageData()
     {
         var grain = _clusterClient.GetGrain<IInsightsGrain>(IInsightsGrain.SingletonKey);
         var data = await grain.GetOverviewPageData();
-        return JsonSerializer.SerializeToElement(data, _jsonOptions);
+        return JsonSerializer.SerializeToElement(data, JsonOptions);
     }
 
-    /// <summary>
-    /// Get Orleans page data immediately.
-    /// </summary>
+    /// <summary>Get Orleans page data immediately.</summary>
     public async Task<JsonElement> GetOrleansPageData()
     {
         var grain = _clusterClient.GetGrain<IInsightsGrain>(IInsightsGrain.SingletonKey);
         var data = await grain.GetOrleansPageData();
-        return JsonSerializer.SerializeToElement(data, _jsonOptions);
+        return JsonSerializer.SerializeToElement(data, JsonOptions);
     }
 
-    /// <summary>
-    /// Get Insights page data immediately.
-    /// </summary>
+    /// <summary>Get Insights page data immediately.</summary>
     public async Task<JsonElement> GetInsightsPageData()
     {
         var grain = _clusterClient.GetGrain<IInsightsGrain>(IInsightsGrain.SingletonKey);
         var data = await grain.GetInsightsPageData();
-        return JsonSerializer.SerializeToElement(data, _jsonOptions);
+        return JsonSerializer.SerializeToElement(data, JsonOptions);
     }
 
-    /// <summary>
-    /// Get Settings page data - server configuration.
-    /// </summary>
+    /// <summary>Get Settings page data - server configuration.</summary>
     public Task<JsonElement> GetSettingsPageData()
     {
         var configDict = new Dictionary<string, object?>();
         BuildConfigDictionary(_configuration, configDict);
-        return Task.FromResult(JsonSerializer.SerializeToElement(configDict, _jsonOptions));
+        return Task.FromResult(JsonSerializer.SerializeToElement(configDict, JsonOptions));
+    }
+
+    /// <summary>Get method profile trend data for charts.</summary>
+    public async Task<JsonElement> GetMethodProfileTrend(
+        string? grainType = null,
+        string? methodName = null,
+        double durationSeconds = 300,
+        int bucketSeconds = 1)
+    {
+        _logger.LogDebug(
+            "GetMethodProfileTrend: grainType={GrainType}, method={MethodName}, duration={Duration}s",
+            grainType, methodName, durationSeconds);
+
+        var grain = _clusterClient.GetGrain<IInsightsGrain>(IInsightsGrain.SingletonKey);
+        var effectiveDuration = TimeSpan.FromSeconds(durationSeconds);
+
+        // Route to the appropriate method based on parameters
+        object data = (grainType, methodName) switch
+        {
+            (not null, not null) => await grain.GetMethodProfileTrendForMethod(grainType, methodName, effectiveDuration, bucketSeconds),
+            (not null, null) => await grain.GetMethodProfileTrendForGrain(grainType, effectiveDuration, bucketSeconds),
+            _ => await grain.GetMethodProfileTrend(effectiveDuration, bucketSeconds)
+        };
+
+        return JsonSerializer.SerializeToElement(data, JsonOptions);
+    }
+
+    #endregion
+
+    #region Helper Methods
+
+    private async Task<JsonElement> GetPageDataAsync(string pageName) => pageName switch
+    {
+        DashboardPages.Health => await GetHealthPageData(),
+        DashboardPages.Overview => await GetOverviewPageData(),
+        DashboardPages.Orleans => await GetOrleansPageData(),
+        DashboardPages.Insights => await GetInsightsPageData(),
+        DashboardPages.Settings => await GetSettingsPageData(),
+        _ => default
+    };
+
+    private static string CapitalizeFirstLetter(ReadOnlySpan<char> input)
+    {
+        if (input.IsEmpty) return string.Empty;
+        return string.Create(input.Length, input.ToString(), (span, str) =>
+        {
+            span[0] = char.ToUpper(str[0]);
+            str.AsSpan(1).ToLower(span[1..], null);
+        });
     }
 
     private static void BuildConfigDictionary(IConfiguration config, Dictionary<string, object?> dict)
@@ -161,10 +209,7 @@ public class DashboardHub : Hub
         foreach (var section in config.GetChildren())
         {
             // Skip sensitive sections
-            if (section.Key.Equals("ConnectionStrings", StringComparison.OrdinalIgnoreCase) ||
-                section.Key.Contains("Secret", StringComparison.OrdinalIgnoreCase) ||
-                section.Key.Contains("Password", StringComparison.OrdinalIgnoreCase) ||
-                section.Key.Contains("Key", StringComparison.OrdinalIgnoreCase) && section.Key.Contains("Api", StringComparison.OrdinalIgnoreCase))
+            if (IsSensitiveKey(section.Key))
             {
                 dict[section.Key] = "[REDACTED]";
                 continue;
@@ -178,93 +223,19 @@ public class DashboardHub : Hub
             }
             else
             {
-                // Redact individual sensitive values
-                var value = section.Value;
-                if (IsSensitiveKey(section.Key))
-                {
-                    value = "[REDACTED]";
-                }
-                dict[section.Key] = value;
+                dict[section.Key] = section.Value;
             }
         }
     }
 
-    private static bool IsSensitiveKey(string key) =>
-        key.Contains("Secret", StringComparison.OrdinalIgnoreCase) ||
-        key.Contains("Password", StringComparison.OrdinalIgnoreCase) ||
-        key.Contains("Token", StringComparison.OrdinalIgnoreCase) ||
-        key.Contains("ApiKey", StringComparison.OrdinalIgnoreCase) ||
-        key.Contains("ConnectionString", StringComparison.OrdinalIgnoreCase);
-
-    /// <summary>
-    /// Get method profile trend data for charts.
-    /// </summary>
-    /// <param name="grainType">Grain type name</param>
-    /// <param name="methodName">Method name</param>
-    /// <param name="durationSeconds">Duration in seconds (default 300 = 5 minutes)</param>
-    /// <param name="bucketSeconds">Bucket size in seconds</param>
-    public async Task<JsonElement> GetMethodProfileTrend(
-        string? grainType = null,
-        string? methodName = null,
-        double durationSeconds = 300,
-        int bucketSeconds = 1)
-    {
-        _logger.LogDebug("GetMethodProfileTrend called: grainType={GrainType}, methodName={MethodName}, duration={Duration}s, bucket={Bucket}s",
-            grainType, methodName, durationSeconds, bucketSeconds);
-
-        var grain = _clusterClient.GetGrain<IInsightsGrain>(IInsightsGrain.SingletonKey);
-        var effectiveDuration = TimeSpan.FromSeconds(durationSeconds);
-
-        // Route to the appropriate method based on parameters
-        object data;
-        if (!string.IsNullOrEmpty(methodName) && !string.IsNullOrEmpty(grainType))
-        {
-            data = await grain.GetMethodProfileTrendForMethod(grainType, methodName, effectiveDuration, bucketSeconds);
-            _logger.LogDebug("GetMethodProfileTrendForMethod returned {Count} points", ((System.Collections.IList)data).Count);
-        }
-        else if (!string.IsNullOrEmpty(grainType))
-        {
-            data = await grain.GetMethodProfileTrendForGrain(grainType, effectiveDuration, bucketSeconds);
-            _logger.LogDebug("GetMethodProfileTrendForGrain returned {Count} points", ((System.Collections.IList)data).Count);
-        }
-        else
-        {
-            data = await grain.GetMethodProfileTrend(effectiveDuration, bucketSeconds);
-            _logger.LogDebug("GetMethodProfileTrend returned {Count} points", ((System.Collections.IList)data).Count);
-        }
-
-        return JsonSerializer.SerializeToElement(data, _jsonOptions);
-    }
-
-    #endregion
-
-    #region Helper Methods
-
-    private async Task<JsonElement> GetPageDataAsync(string pageName)
-    {
-        return pageName.ToLowerInvariant() switch
-        {
-            "health" => await GetHealthPageData(),
-            "overview" => await GetOverviewPageData(),
-            "orleans" => await GetOrleansPageData(),
-            "insights" => await GetInsightsPageData(),
-            "settings" => await GetSettingsPageData(),
-            _ => default
-        };
-    }
-
-    private static string CapitalizeFirstLetter(string input)
-    {
-        if (string.IsNullOrEmpty(input)) return input;
-        return char.ToUpper(input[0]) + input[1..].ToLower();
-    }
+    private static bool IsSensitiveKey(string key)
+        => SensitiveKeys.Any(sensitive => key.Contains(sensitive, StringComparison.OrdinalIgnoreCase));
 
     #endregion
 }
 
 /// <summary>
 /// Page name constants for SignalR groups.
-/// Must match the page names used in SubscribeToPage/UnsubscribeFromPage.
 /// </summary>
 public static class DashboardPages
 {

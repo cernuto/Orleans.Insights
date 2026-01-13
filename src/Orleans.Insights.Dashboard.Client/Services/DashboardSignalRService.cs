@@ -1,47 +1,37 @@
 using Microsoft.AspNetCore.Components;
 using Microsoft.AspNetCore.SignalR.Client;
 using Microsoft.Extensions.Logging;
-using System;
-using System.Collections.Generic;
-using System.Linq;
 using System.Text.Json;
-using System.Threading.Tasks;
 
 namespace Orleans.Insights.Dashboard.Client.Services;
 
 /// <summary>
-/// SignalR-based implementation of IDashboardDataService for WASM clients.
-///
-/// Connects to DashboardHub on the server and:
-/// - Subscribes to page updates (joins SignalR groups)
-/// - Receives pushed data from grain observers
-/// - Fires events for page components to update UI
-///
-/// Uses automatic reconnection with exponential backoff.
-/// Includes periodic heartbeat to keep Orleans SignalR observer references alive.
+/// SignalR-based implementation of IDashboardDataService for Blazor WASM clients.
 /// </summary>
+/// <remarks>
+/// <para>
+/// This service manages the SignalR connection to the dashboard hub and provides:
+/// </para>
+/// <list type="bullet">
+/// <item>Automatic reconnection with exponential backoff</item>
+/// <item>Page subscription management (joins SignalR groups)</item>
+/// <item>Push-based updates from grain observers</item>
+/// <item>Periodic heartbeat to keep Orleans observer references alive</item>
+/// </list>
+/// </remarks>
 public sealed class DashboardSignalRService : IDashboardDataService
 {
     private readonly NavigationManager _navigationManager;
     private readonly ILogger<DashboardSignalRService> _logger;
     private HubConnection? _hubConnection;
-    private bool _disposed;
+    private volatile bool _disposed;
 
-    /// <summary>
-    /// Pages currently subscribed to. Used for heartbeat refresh.
-    /// </summary>
+    // .NET 9+: Use Lock class for better performance than object lock
+    private readonly Lock _subscribedPagesLock = new();
     private readonly HashSet<string> _subscribedPages = new(StringComparer.OrdinalIgnoreCase);
-    private readonly object _subscribedPagesLock = new();
 
-    /// <summary>
-    /// Timer for periodic heartbeat to keep Orleans observer references alive.
-    /// </summary>
-    private System.Threading.Timer? _heartbeatTimer;
-
-    /// <summary>
-    /// Heartbeat interval - must be less than Orleans ClientTimeoutInterval (default 30s).
-    /// Using 15 seconds provides comfortable margin.
-    /// </summary>
+    // Heartbeat timer - keeps Orleans observer references alive (15s < Orleans 30s timeout)
+    private Timer? _heartbeatTimer;
     private static readonly TimeSpan HeartbeatInterval = TimeSpan.FromSeconds(15);
 
     public DashboardSignalRService(
@@ -58,74 +48,73 @@ public sealed class DashboardSignalRService : IDashboardDataService
 
     public event Action<bool>? OnConnectionStateChanged;
 
-    /// <summary>
-    /// Retry delays for initial connection attempts.
-    /// Uses exponential backoff: 0s, 1s, 2s, 5s, 10s (total ~18s of retries).
-    /// </summary>
-    private static readonly int[] InitialConnectionRetryDelaysMs = [0, 1000, 2000, 5000, 10000];
+    // Retry delays for initial connection (exponential backoff: 0s, 1s, 2s, 5s, 10s)
+    private static readonly TimeSpan[] InitialConnectionRetryDelays =
+    [
+        TimeSpan.Zero,
+        TimeSpan.FromSeconds(1),
+        TimeSpan.FromSeconds(2),
+        TimeSpan.FromSeconds(5),
+        TimeSpan.FromSeconds(10)
+    ];
 
     public async Task StartAsync()
     {
-        if (_hubConnection != null)
+        if (_hubConnection is not null)
             return;
 
-        // Hub URL - BaseUri already includes the base href (e.g., https://localhost:5001/dashboard/)
-        // So we just need to append "hub" to get the full hub URL
+        // Build hub URL from NavigationManager base URI
         var hubUrl = new Uri(new Uri(_navigationManager.BaseUri), "hub");
 
         // Configure SignalR with automatic reconnection
         _hubConnection = new HubConnectionBuilder()
             .WithUrl(hubUrl)
-            .WithAutomaticReconnect(new[]
-            {
-                TimeSpan.FromSeconds(0),
+            .WithAutomaticReconnect([
+                TimeSpan.Zero,
                 TimeSpan.FromSeconds(2),
                 TimeSpan.FromSeconds(5),
                 TimeSpan.FromSeconds(10),
                 TimeSpan.FromSeconds(30)
-            })
+            ])
             .Build();
 
         // Register handlers for server-pushed page data
         RegisterHandlers();
 
         // Track connection state changes
-        _hubConnection.Closed += async (error) =>
+        _hubConnection.Closed += error =>
         {
             _logger.LogWarning(error, "SignalR connection closed");
             StopHeartbeatTimer();
             OnConnectionStateChanged?.Invoke(false);
-            await Task.CompletedTask;
+            return Task.CompletedTask;
         };
 
-        _hubConnection.Reconnecting += (error) =>
+        _hubConnection.Reconnecting += error =>
         {
             _logger.LogInformation(error, "SignalR reconnecting...");
-            StopHeartbeatTimer(); // Stop heartbeat during reconnection
+            StopHeartbeatTimer();
             OnConnectionStateChanged?.Invoke(false);
             return Task.CompletedTask;
         };
 
-        _hubConnection.Reconnected += async (connectionId) =>
+        _hubConnection.Reconnected += async connectionId =>
         {
             _logger.LogInformation("SignalR reconnected: {ConnectionId}", connectionId);
             StartHeartbeatTimer();
-
-            // Re-subscribe to all pages after reconnection to refresh Orleans observer references
             await ResubscribeAllPagesAsync();
-
             OnConnectionStateChanged?.Invoke(true);
         };
 
         // Retry initial connection with exponential backoff
         // WithAutomaticReconnect only works AFTER a successful connection
-        for (var attempt = 0; attempt < InitialConnectionRetryDelaysMs.Length; attempt++)
+        for (var attempt = 0; attempt < InitialConnectionRetryDelays.Length; attempt++)
         {
-            var delay = InitialConnectionRetryDelaysMs[attempt];
-            if (delay > 0)
+            var delay = InitialConnectionRetryDelays[attempt];
+            if (delay > TimeSpan.Zero)
             {
                 _logger.LogInformation("Retrying SignalR connection in {DelayMs}ms (attempt {Attempt}/{Max})",
-                    delay, attempt + 1, InitialConnectionRetryDelaysMs.Length);
+                    delay.TotalMilliseconds, attempt + 1, InitialConnectionRetryDelays.Length);
                 await Task.Delay(delay);
             }
 
@@ -135,18 +124,17 @@ public sealed class DashboardSignalRService : IDashboardDataService
                 _logger.LogInformation("SignalR connected to dashboard hub");
                 StartHeartbeatTimer();
                 OnConnectionStateChanged?.Invoke(true);
-                return; // Success - exit retry loop
+                return;
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "SignalR connection attempt {Attempt}/{Max} failed",
-                    attempt + 1, InitialConnectionRetryDelaysMs.Length);
+                    attempt + 1, InitialConnectionRetryDelays.Length);
             }
         }
 
-        // All retries exhausted
         _logger.LogError("Failed to connect to dashboard hub after {Attempts} attempts",
-            InitialConnectionRetryDelaysMs.Length);
+            InitialConnectionRetryDelays.Length);
         OnConnectionStateChanged?.Invoke(false);
     }
 
@@ -179,7 +167,7 @@ public sealed class DashboardSignalRService : IDashboardDataService
 
     private void RegisterHandlers()
     {
-        if (_hubConnection == null) return;
+        if (_hubConnection is null) return;
 
         _hubConnection.On<JsonElement>("ReceiveHealthData", data =>
         {
@@ -212,7 +200,7 @@ public sealed class DashboardSignalRService : IDashboardDataService
 
     public async Task SubscribeToPage(string pageName)
     {
-        if (_hubConnection == null || !IsConnected)
+        if (_hubConnection is null || !IsConnected)
         {
             _logger.LogWarning("Cannot subscribe to {Page}: not connected", pageName);
             return;
@@ -237,7 +225,7 @@ public sealed class DashboardSignalRService : IDashboardDataService
 
     public async Task UnsubscribeFromPage(string pageName)
     {
-        if (_hubConnection == null || !IsConnected)
+        if (_hubConnection is null || !IsConnected)
             return;
 
         try
@@ -268,53 +256,40 @@ public sealed class DashboardSignalRService : IDashboardDataService
 
     #endregion
 
-    #region Data Fetch (via Hub)
+    #region Data Fetch
 
-    public async Task<JsonElement> GetHealthPageDataAsync()
-    {
-        return await InvokeAsync("GetHealthPageData");
-    }
+    public Task<JsonElement> GetHealthPageDataAsync()
+        => InvokeHubMethodAsync("GetHealthPageData");
 
-    public async Task<JsonElement> GetOverviewPageDataAsync()
-    {
-        return await InvokeAsync("GetOverviewPageData");
-    }
+    public Task<JsonElement> GetOverviewPageDataAsync()
+        => InvokeHubMethodAsync("GetOverviewPageData");
 
-    public async Task<JsonElement> GetOrleansPageDataAsync()
-    {
-        return await InvokeAsync("GetOrleansPageData");
-    }
+    public Task<JsonElement> GetOrleansPageDataAsync()
+        => InvokeHubMethodAsync("GetOrleansPageData");
 
-    public async Task<JsonElement> GetInsightsPageDataAsync()
-    {
-        return await InvokeAsync("GetInsightsPageData");
-    }
+    public Task<JsonElement> GetInsightsPageDataAsync()
+        => InvokeHubMethodAsync("GetInsightsPageData");
 
-    public async Task<JsonElement> GetSettingsPageDataAsync()
-    {
-        return await InvokeAsync("GetSettingsPageData");
-    }
+    public Task<JsonElement> GetSettingsPageDataAsync()
+        => InvokeHubMethodAsync("GetSettingsPageData");
 
-    public async Task<JsonElement> GetMethodProfileTrendAsync(
+    public Task<JsonElement> GetMethodProfileTrendAsync(
         string? grainType = null,
         string? methodName = null,
         TimeSpan? duration = null,
         int bucketSeconds = 1)
     {
         var durationSeconds = (duration ?? TimeSpan.FromMinutes(5)).TotalSeconds;
-        _logger.LogDebug("GetMethodProfileTrendAsync: grainType={GrainType}, methodName={MethodName}, duration={Duration}s, bucket={Bucket}s",
-            grainType, methodName, durationSeconds, bucketSeconds);
-        return await InvokeAsync(
-            "GetMethodProfileTrend",
-            grainType,
-            methodName,
-            durationSeconds,
-            bucketSeconds);
+        _logger.LogDebug(
+            "GetMethodProfileTrendAsync: grainType={GrainType}, method={Method}, duration={Duration}s",
+            grainType, methodName, durationSeconds);
+
+        return InvokeHubMethodAsync("GetMethodProfileTrend", grainType, methodName, durationSeconds, bucketSeconds);
     }
 
-    private async Task<JsonElement> InvokeAsync(string method, params object?[] args)
+    private async Task<JsonElement> InvokeHubMethodAsync(string method, params object?[] args)
     {
-        if (_hubConnection == null || !IsConnected)
+        if (_hubConnection is null || !IsConnected)
         {
             _logger.LogWarning("Cannot invoke {Method}: not connected", method);
             return default;
@@ -322,7 +297,6 @@ public sealed class DashboardSignalRService : IDashboardDataService
 
         try
         {
-            // Use InvokeCoreAsync to pass args as individual parameters, not as a single array
             return await _hubConnection.InvokeCoreAsync<JsonElement>(method, args);
         }
         catch (Exception ex)
@@ -336,74 +310,51 @@ public sealed class DashboardSignalRService : IDashboardDataService
 
     #region Heartbeat
 
-    /// <summary>
-    /// Starts the heartbeat timer to periodically refresh Orleans observer references.
-    /// This prevents observer expiration in long-running sessions.
-    /// </summary>
     private void StartHeartbeatTimer()
     {
         StopHeartbeatTimer();
-        _heartbeatTimer = new System.Threading.Timer(
+        _heartbeatTimer = new Timer(
             _ => _ = HeartbeatAsync(),
             null,
             HeartbeatInterval,
             HeartbeatInterval);
-        _logger.LogInformation("SignalR heartbeat started (interval: {Interval}s)", HeartbeatInterval.TotalSeconds);
+        _logger.LogDebug("Heartbeat started (interval: {Interval}s)", HeartbeatInterval.TotalSeconds);
     }
 
-    /// <summary>
-    /// Stops the heartbeat timer.
-    /// </summary>
     private void StopHeartbeatTimer()
     {
         _heartbeatTimer?.Dispose();
         _heartbeatTimer = null;
     }
 
-    /// <summary>
-    /// Periodic heartbeat that re-subscribes to all current pages.
-    /// This refreshes the Orleans observer references to prevent expiration.
-    /// </summary>
     private async Task HeartbeatAsync()
     {
-        if (_hubConnection == null || !IsConnected || _disposed)
-        {
-            _logger.LogDebug("Heartbeat skipped: connected={Connected}, disposed={Disposed}",
-                IsConnected, _disposed);
+        if (_hubConnection is null || !IsConnected || _disposed)
             return;
-        }
 
         string[] pagesToRefresh;
         lock (_subscribedPagesLock)
         {
             if (_subscribedPages.Count == 0)
-            {
-                _logger.LogDebug("Heartbeat: no subscribed pages");
                 return;
-            }
-            pagesToRefresh = _subscribedPages.ToArray();
+            pagesToRefresh = [.. _subscribedPages];
         }
 
-        _logger.LogDebug("Heartbeat: refreshing {Count} page subscriptions", pagesToRefresh.Length);
+        _logger.LogDebug("Heartbeat: refreshing {Count} subscriptions", pagesToRefresh.Length);
 
         foreach (var page in pagesToRefresh)
         {
             try
             {
-                // Re-subscribing refreshes the observer reference in the Orleans group grain
                 await _hubConnection.InvokeAsync("SubscribeToPage", page);
-                _logger.LogDebug("Heartbeat: refreshed subscription to {Page}", page);
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Heartbeat: failed to refresh subscription to {Page}", page);
+                _logger.LogWarning(ex, "Heartbeat: failed to refresh {Page}", page);
             }
         }
     }
 
-    /// <summary>
-    /// Re-subscribes to all tracked pages. Used after reconnection.
-    /// </summary>
     private async Task ResubscribeAllPagesAsync()
     {
         string[] pagesToResubscribe;
@@ -411,17 +362,16 @@ public sealed class DashboardSignalRService : IDashboardDataService
         {
             if (_subscribedPages.Count == 0)
                 return;
-            pagesToResubscribe = _subscribedPages.ToArray();
+            pagesToResubscribe = [.. _subscribedPages];
         }
 
-        _logger.LogInformation("Re-subscribing to {Count} pages after reconnection", pagesToResubscribe.Length);
+        _logger.LogInformation("Re-subscribing to {Count} pages", pagesToResubscribe.Length);
 
         foreach (var page in pagesToResubscribe)
         {
             try
             {
                 await _hubConnection!.InvokeAsync("SubscribeToPage", page);
-                _logger.LogDebug("Re-subscribed to {Page}", page);
             }
             catch (Exception ex)
             {
@@ -447,7 +397,7 @@ public sealed class DashboardSignalRService : IDashboardDataService
             _subscribedPages.Clear();
         }
 
-        if (_hubConnection != null)
+        if (_hubConnection is not null)
         {
             await _hubConnection.DisposeAsync();
             _hubConnection = null;

@@ -1,20 +1,46 @@
 using System;
 using System.Collections.Generic;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Orleans.Insights.Dashboard.Client.Models;
 
 /// <summary>
+/// Source-generated JSON serializer context for dashboard view models.
+/// Eliminates reflection overhead for better WASM performance.
+/// </summary>
+[JsonSourceGenerationOptions(
+    PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
+    PropertyNameCaseInsensitive = true,
+    DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
+[JsonSerializable(typeof(HealthPageViewModel))]
+[JsonSerializable(typeof(OverviewPageViewModel))]
+[JsonSerializable(typeof(OrleansPageViewModel))]
+[JsonSerializable(typeof(InsightsPageViewModel))]
+[JsonSerializable(typeof(MethodProfileTrendViewModel))]
+[JsonSerializable(typeof(List<MethodProfileTrendViewModel>))]
+[JsonSerializable(typeof(Dictionary<string, object>))]
+public partial class DashboardJsonContext : JsonSerializerContext;
+
+/// <summary>
 /// JSON serializer options for deserializing page data.
+/// Uses source generation for optimal performance in WASM.
 /// </summary>
 public static class JsonOptions
 {
+    /// <summary>
+    /// Default options using source-generated serializer context.
+    /// </summary>
     public static readonly JsonSerializerOptions Default = new()
     {
         PropertyNameCaseInsensitive = true,
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        TypeInfoResolver = DashboardJsonContext.Default
     };
 
+    /// <summary>
+    /// Deserialize JSON element to specified type using source-generated context.
+    /// </summary>
     public static T? Deserialize<T>(JsonElement json) where T : class
     {
         return json.Deserialize<T>(Default);
@@ -299,5 +325,25 @@ public record InsightDatabaseSummaryViewModel
 /// Data point for pie chart visualization.
 /// </summary>
 public record PieChartDataPoint(string Label, double Value, string? Color = null);
+
+/// <summary>
+/// Time-bucketed method profile trend point for streaming charts.
+/// Mirrors Orleans.Insights.Models.MethodProfileTrendPoint.
+/// </summary>
+public record MethodProfileTrendViewModel
+{
+    public DateTime Timestamp { get; init; }
+    public string GrainType { get; init; } = "";
+    public string MethodName { get; init; } = "";
+    public long CallCount { get; init; }
+    public double TotalElapsedMs { get; init; }
+    public long ExceptionCount { get; init; }
+    public double AvgLatencyMs { get; init; }
+    public double CallsPerSecond { get; init; }
+    public double ExceptionRate { get; init; }
+
+    public static List<MethodProfileTrendViewModel> FromJson(JsonElement json)
+        => json.Deserialize<List<MethodProfileTrendViewModel>>(JsonOptions.Default) ?? [];
+}
 
 #endregion
