@@ -21,6 +21,17 @@
             </svg>
         </button>
         <div class="mobile-logo">
+            <!-- Orleans Hexagon Logo (Mobile) -->
+            <svg class="mobile-logo-icon" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+                <defs>
+                    <linearGradient id="mobileHexGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                        <stop offset="0%" style="stop-color:#b877c8"/>
+                        <stop offset="100%" style="stop-color:#7b4397"/>
+                    </linearGradient>
+                </defs>
+                <polygon points="50,5 90,27.5 90,72.5 50,95 10,72.5 10,27.5" fill="url(#mobileHexGradient)"/>
+                <polygon points="50,25 70,37.5 70,62.5 50,75 30,62.5 30,37.5" fill="#000"/>
+            </svg>
             <span class="logo-text">Orleans.Insights</span>
         </div>
     </header>
@@ -34,13 +45,40 @@
     <aside class="sidebar">
         <div class="sidebar-header">
             <div class="logo">
+                <!-- Orleans Hexagon Logo -->
+                <svg class="logo-icon" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+                    <defs>
+                        <linearGradient id="sidebarHexGradientOuter" x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%" style="stop-color:#9b59b6"/>
+                            <stop offset="50%" style="stop-color:#7b4397"/>
+                            <stop offset="100%" style="stop-color:#5a2d6e"/>
+                        </linearGradient>
+                        <linearGradient id="sidebarHexGradientLeft" x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%" style="stop-color:#b877c8"/>
+                            <stop offset="100%" style="stop-color:#9b59b6"/>
+                        </linearGradient>
+                        <linearGradient id="sidebarHexGradientRight" x1="100%" y1="0%" x2="0%" y2="100%">
+                            <stop offset="0%" style="stop-color:#7b4397"/>
+                            <stop offset="100%" style="stop-color:#5a2d6e"/>
+                        </linearGradient>
+                    </defs>
+                    <polygon points="50,5 90,27.5 90,72.5 50,95 10,72.5 10,27.5" fill="url(#sidebarHexGradientOuter)"/>
+                    <polygon points="10,27.5 50,5 50,50 10,72.5" fill="url(#sidebarHexGradientLeft)" opacity="0.9"/>
+                    <polygon points="90,27.5 50,5 50,50 90,72.5" fill="url(#sidebarHexGradientRight)" opacity="0.85"/>
+                    <polygon points="50,25 70,37.5 70,62.5 50,75 30,62.5 30,37.5" fill="#0d0d0d"/>
+                </svg>
                 <span class="logo-text">Orleans.Insights</span>
             </div>
             <button type="button" class="collapse-btn" @onclick="ToggleCollapse" @onclick:preventDefault="true" @onclick:stopPropagation="true" title="@(_sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar")">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <line x1="3" y1="6" x2="21" y2="6"/>
-                    <line x1="3" y1="12" x2="21" y2="12"/>
-                    <line x1="3" y1="18" x2="21" y2="18"/>
+                    @if (_sidebarCollapsed)
+                    {
+                        <polyline points="9 18 15 12 9 6"/>
+                    }
+                    else
+                    {
+                        <polyline points="15 18 9 12 15 6"/>
+                    }
                 </svg>
             </button>
         </div>
@@ -76,18 +114,90 @@
             </NavLink>
             <NavLink class="nav-item" href="insights" @onclick="CloseSidebar" title="Insights">
                 <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <circle cx="12" cy="12" r="10"/>
-                    <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
-                    <line x1="2" y1="12" x2="22" y2="12"/>
+                    <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                    <polyline points="7.5 4.21 12 6.81 16.5 4.21"/>
+                    <polyline points="7.5 19.79 7.5 14.6 3 12"/>
+                    <polyline points="21 12 16.5 14.6 16.5 19.79"/>
+                    <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+                    <line x1="12" y1="22.08" x2="12" y2="12"/>
                 </svg>
                 <span class="nav-text">Insights</span>
             </NavLink>
         </nav>
+
+        @* Collapsed state - show only logo icon at bottom *@
+        <div class="collapsed-logo">
+            <svg class="collapsed-logo-icon" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+                <defs>
+                    <linearGradient id="collapsedHexGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                        <stop offset="0%" style="stop-color:#b877c8"/>
+                        <stop offset="100%" style="stop-color:#7b4397"/>
+                    </linearGradient>
+                </defs>
+                <polygon points="50,5 90,27.5 90,72.5 50,95 10,72.5 10,27.5" fill="url(#collapsedHexGradient)"/>
+                <polygon points="50,25 70,37.5 70,62.5 50,75 30,62.5 30,37.5" fill="#0d0d0d"/>
+            </svg>
+        </div>
     </aside>
     <main class="main-content">
         @Body
     </main>
 </div>
+
+<style>
+    /* Logo styles */
+    .logo {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+    }
+
+    .logo-icon {
+        width: 32px;
+        height: 32px;
+        flex-shrink: 0;
+    }
+
+    .mobile-logo {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+
+    .mobile-logo-icon {
+        width: 28px;
+        height: 28px;
+    }
+
+    /* Collapsed sidebar logo */
+    .collapsed-logo {
+        display: none;
+        justify-content: center;
+        padding: 0.75rem 0;
+        margin-top: auto;
+        border-top: 1px solid var(--border);
+    }
+
+    .dashboard.sidebar-collapsed .collapsed-logo {
+        display: flex;
+    }
+
+    .dashboard.sidebar-collapsed .logo {
+        display: none;
+    }
+
+    .collapsed-logo-icon {
+        width: 28px;
+        height: 28px;
+        opacity: 0.8;
+    }
+
+    /* Collapse button icon adjustment */
+    .collapse-btn svg {
+        width: 16px;
+        height: 16px;
+    }
+</style>
 
 @code {
     private bool _sidebarOpen;
