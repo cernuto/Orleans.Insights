@@ -238,22 +238,37 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
     public Task<List<GrainTypeInsight>> GetTopGrainTypes(InsightMetric metric, int count = 10, TimeSpan? duration = null)
     {
         var cutoff = DateTime.UtcNow - (duration ?? Settings.DefaultQueryDuration);
-        var orderBy = OrderByMapping.GetValueOrDefault(metric, "avg_latency DESC");
+        var windowSeconds = (duration ?? Settings.DefaultQueryDuration).TotalSeconds;
 
+        // Map metric to ORDER BY clause for method_profile table
+        var orderBy = metric switch
+        {
+            InsightMetric.Latency => "avg_latency DESC",
+            InsightMetric.Requests => "total_requests DESC",
+            InsightMetric.Errors => "failed_requests DESC",
+            InsightMetric.Throughput => "rps DESC",
+            InsightMetric.ErrorRate => "error_rate DESC",
+            _ => "avg_latency DESC"
+        };
+
+        // Query from method_profile table (populated by GrainMethodProfiler) instead of grain_metrics
+        // This is where actual grain call data is stored
         var sql = $"""
             SELECT
                 grain_type,
-                SUM(total_requests) as total_requests,
-                SUM(failed_requests) as failed_requests,
-                AVG(avg_latency_ms) as avg_latency,
-                MIN(min_latency_ms) as min_latency,
-                MAX(max_latency_ms) as max_latency,
-                AVG(requests_per_second) as rps,
-                CASE WHEN SUM(total_requests) > 0
-                     THEN (SUM(failed_requests)::DOUBLE / SUM(total_requests)) * 100
+                SUM(call_count) as total_requests,
+                SUM(exception_count) as failed_requests,
+                CASE WHEN SUM(call_count) > 0
+                     THEN SUM(total_elapsed_ms) / SUM(call_count)
+                     ELSE 0 END as avg_latency,
+                MIN(CASE WHEN call_count > 0 THEN total_elapsed_ms / call_count ELSE NULL END) as min_latency,
+                MAX(CASE WHEN call_count > 0 THEN total_elapsed_ms / call_count ELSE NULL END) as max_latency,
+                SUM(call_count) / {windowSeconds:F2} as rps,
+                CASE WHEN SUM(call_count) > 0
+                     THEN (SUM(exception_count)::DOUBLE / SUM(call_count)) * 100
                      ELSE 0 END as error_rate,
                 COUNT(DISTINCT silo_id) as silo_count
-            FROM grain_metrics
+            FROM method_profile
             WHERE timestamp >= $1
             GROUP BY grain_type
             ORDER BY {orderBy}
@@ -288,21 +303,35 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
     public Task<List<MethodInsight>> GetTopMethods(InsightMetric metric, int count = 10, TimeSpan? duration = null)
     {
         var cutoff = DateTime.UtcNow - (duration ?? Settings.DefaultQueryDuration);
-        var orderBy = OrderByMapping.GetValueOrDefault(metric, "avg_latency DESC");
+        var windowSeconds = (duration ?? Settings.DefaultQueryDuration).TotalSeconds;
 
+        // Map metric to ORDER BY clause for method_profile table
+        var orderBy = metric switch
+        {
+            InsightMetric.Latency => "avg_latency DESC",
+            InsightMetric.Requests => "total_requests DESC",
+            InsightMetric.Errors => "failed_requests DESC",
+            InsightMetric.Throughput => "rps DESC",
+            InsightMetric.ErrorRate => "error_rate DESC",
+            _ => "avg_latency DESC"
+        };
+
+        // Query from method_profile table (populated by GrainMethodProfiler) instead of method_metrics
         var sql = $"""
             SELECT
                 grain_type,
                 method_name,
-                SUM(total_requests) as total_requests,
-                SUM(failed_requests) as failed_requests,
-                AVG(avg_latency_ms) as avg_latency,
-                AVG(requests_per_second) as rps,
-                CASE WHEN SUM(total_requests) > 0
-                     THEN (SUM(failed_requests)::DOUBLE / SUM(total_requests)) * 100
+                SUM(call_count) as total_requests,
+                SUM(exception_count) as failed_requests,
+                CASE WHEN SUM(call_count) > 0
+                     THEN SUM(total_elapsed_ms) / SUM(call_count)
+                     ELSE 0 END as avg_latency,
+                SUM(call_count) / {windowSeconds:F2} as rps,
+                CASE WHEN SUM(call_count) > 0
+                     THEN (SUM(exception_count)::DOUBLE / SUM(call_count)) * 100
                      ELSE 0 END as error_rate,
                 COUNT(DISTINCT silo_id) as silo_count
-            FROM method_metrics
+            FROM method_profile
             WHERE timestamp >= $1
             GROUP BY grain_type, method_name
             ORDER BY {orderBy}
@@ -337,15 +366,18 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
     {
         var cutoff = DateTime.UtcNow - duration;
 
+        // Query from method_profile table using accurate totals calculation
         var sql = $"""
             SELECT
                 time_bucket(INTERVAL '{bucketSeconds} seconds', timestamp) as bucket,
-                AVG(avg_latency_ms) as avg_latency,
-                MIN(min_latency_ms) as min_latency,
-                MAX(max_latency_ms) as max_latency,
-                SUM(total_requests) as request_count,
-                AVG(requests_per_second) as rps
-            FROM grain_metrics
+                CASE WHEN SUM(call_count) > 0
+                     THEN SUM(total_elapsed_ms) / SUM(call_count)
+                     ELSE 0 END as avg_latency,
+                MIN(CASE WHEN call_count > 0 THEN total_elapsed_ms / call_count ELSE NULL END) as min_latency,
+                MAX(CASE WHEN call_count > 0 THEN total_elapsed_ms / call_count ELSE NULL END) as max_latency,
+                SUM(call_count) as request_count,
+                SUM(call_count) / {bucketSeconds}.0 as rps
+            FROM method_profile
             WHERE timestamp >= $1 AND grain_type = $2
             GROUP BY bucket
             ORDER BY bucket
@@ -371,15 +403,18 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
     {
         var cutoff = DateTime.UtcNow - duration;
 
+        // Query from method_profile table using accurate totals calculation
         var sql = $"""
             SELECT
                 time_bucket(INTERVAL '{bucketSeconds} seconds', timestamp) as bucket,
-                AVG(avg_latency_ms) as avg_latency,
-                MIN(avg_latency_ms) as min_latency,
-                MAX(avg_latency_ms) as max_latency,
-                SUM(total_requests) as request_count,
-                AVG(requests_per_second) as rps
-            FROM method_metrics
+                CASE WHEN SUM(call_count) > 0
+                     THEN SUM(total_elapsed_ms) / SUM(call_count)
+                     ELSE 0 END as avg_latency,
+                MIN(CASE WHEN call_count > 0 THEN total_elapsed_ms / call_count ELSE NULL END) as min_latency,
+                MAX(CASE WHEN call_count > 0 THEN total_elapsed_ms / call_count ELSE NULL END) as max_latency,
+                SUM(call_count) as request_count,
+                SUM(call_count) / {bucketSeconds}.0 as rps
+            FROM method_profile
             WHERE timestamp >= $1 AND grain_type = $2 AND method_name = $3
             GROUP BY bucket
             ORDER BY bucket
@@ -407,17 +442,23 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
         var recentCutoff = now - recentWindow;
         var baselineCutoff = now - baselineWindow;
 
-        // Detect latency anomalies for grain types
+        // Detect latency anomalies for grain types using method_profile table
         var latencyAnomalySql = """
             WITH recent AS (
-                SELECT grain_type, AVG(avg_latency_ms) as current_latency
-                FROM grain_metrics
+                SELECT grain_type,
+                       CASE WHEN SUM(call_count) > 0
+                            THEN SUM(total_elapsed_ms) / SUM(call_count)
+                            ELSE 0 END as current_latency
+                FROM method_profile
                 WHERE timestamp >= $1
                 GROUP BY grain_type
             ),
             baseline AS (
-                SELECT grain_type, AVG(avg_latency_ms) as baseline_latency
-                FROM grain_metrics
+                SELECT grain_type,
+                       CASE WHEN SUM(call_count) > 0
+                            THEN SUM(total_elapsed_ms) / SUM(call_count)
+                            ELSE 0 END as baseline_latency
+                FROM method_profile
                 WHERE timestamp >= $2 AND timestamp < $1
                 GROUP BY grain_type
             )
@@ -444,23 +485,23 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
             DeviationMultiplier = InsightsQueryHelper.GetDouble(r, "deviation")
         }).ToList();
 
-        // Detect error rate anomalies
+        // Detect error rate anomalies using method_profile table
         var errorAnomalySql = """
             WITH recent AS (
                 SELECT grain_type,
-                       CASE WHEN SUM(total_requests) > 0
-                            THEN (SUM(failed_requests)::DOUBLE / SUM(total_requests)) * 100
+                       CASE WHEN SUM(call_count) > 0
+                            THEN (SUM(exception_count)::DOUBLE / SUM(call_count)) * 100
                             ELSE 0 END as current_error_rate
-                FROM grain_metrics
+                FROM method_profile
                 WHERE timestamp >= $1
                 GROUP BY grain_type
             ),
             baseline AS (
                 SELECT grain_type,
-                       CASE WHEN SUM(total_requests) > 0
-                            THEN (SUM(failed_requests)::DOUBLE / SUM(total_requests)) * 100
+                       CASE WHEN SUM(call_count) > 0
+                            THEN (SUM(exception_count)::DOUBLE / SUM(call_count)) * 100
                             ELSE 0 END as baseline_error_rate
-                FROM grain_metrics
+                FROM method_profile
                 WHERE timestamp >= $2 AND timestamp < $1
                 GROUP BY grain_type
             )
@@ -507,25 +548,48 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
     {
         var cutoff = DateTime.UtcNow - duration;
 
+        // Combine cluster_metrics (CPU, memory) with method_profile (latency, requests)
         var sql = """
-            WITH silo_stats AS (
+            WITH cluster_stats AS (
                 SELECT
                     silo_id,
                     MAX(host_name) as host_name,
                     AVG(cpu_usage_percent) as avg_cpu,
                     CAST(AVG(memory_usage_mb) AS BIGINT) as avg_memory,
-                    AVG(avg_latency_ms) as avg_latency,
-                    SUM(total_requests) as total_requests,
                     SUM(messages_dropped) as messages_dropped
                 FROM cluster_metrics
                 WHERE timestamp >= $1
                 GROUP BY silo_id
+            ),
+            method_stats AS (
+                SELECT
+                    silo_id,
+                    CASE WHEN SUM(call_count) > 0
+                         THEN SUM(total_elapsed_ms) / SUM(call_count)
+                         ELSE 0 END as avg_latency,
+                    SUM(call_count) as total_requests
+                FROM method_profile
+                WHERE timestamp >= $1
+                GROUP BY silo_id
+            ),
+            silo_stats AS (
+                SELECT
+                    COALESCE(c.silo_id, m.silo_id) as silo_id,
+                    COALESCE(c.host_name, '') as host_name,
+                    COALESCE(c.avg_cpu, 0) as avg_cpu,
+                    COALESCE(c.avg_memory, 0) as avg_memory,
+                    COALESCE(m.avg_latency, 0) as avg_latency,
+                    COALESCE(m.total_requests, 0) as total_requests,
+                    COALESCE(c.messages_dropped, 0) as messages_dropped
+                FROM cluster_stats c
+                FULL OUTER JOIN method_stats m ON c.silo_id = m.silo_id
             ),
             cluster_avg AS (
                 SELECT
                     AVG(avg_latency) as cluster_latency,
                     AVG(avg_cpu) as cluster_cpu
                 FROM silo_stats
+                WHERE avg_latency > 0
             )
             SELECT
                 s.silo_id,
@@ -535,7 +599,7 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
                 s.avg_latency,
                 s.total_requests,
                 s.messages_dropped,
-                CASE WHEN c.cluster_latency > 0
+                CASE WHEN c.cluster_latency > 0 AND s.avg_latency > 0
                      THEN s.avg_latency / c.cluster_latency
                      ELSE 1 END as performance_score
             FROM silo_stats s, cluster_avg c

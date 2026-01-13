@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.FileProviders;
@@ -94,8 +95,34 @@ public static class DashboardExtensions
                 // Serve Blazor WebAssembly framework files at the sub-path
                 dashboardApp.UseBlazorFrameworkFiles(pathPrefix);
 
+                // Configure static file options with cache control headers
+                // Fingerprinted files (with hashes) can be cached indefinitely
+                // Non-fingerprinted files should have no-cache to ensure fresh content after rebuilds
+                var staticFileOptions = new StaticFileOptions
+                {
+                    OnPrepareResponse = ctx =>
+                    {
+                        var path = ctx.Context.Request.Path.Value ?? "";
+
+                        // blazor.boot.json controls what files to load - should not be cached
+                        if (path.EndsWith("blazor.boot.json", StringComparison.OrdinalIgnoreCase))
+                        {
+                            ctx.Context.Response.Headers.CacheControl = "no-cache, no-store, must-revalidate";
+                            ctx.Context.Response.Headers.Pragma = "no-cache";
+                            ctx.Context.Response.Headers.Expires = "0";
+                        }
+                        // Framework files with hashes in names can be cached (they change on rebuild)
+                        else if (path.Contains("/_framework/") &&
+                                 (path.Contains(".") && path.LastIndexOf('.') > path.LastIndexOf('/')))
+                        {
+                            // Allow caching for 1 hour in development, fingerprinted files ensure fresh content
+                            ctx.Context.Response.Headers.CacheControl = "public, max-age=3600";
+                        }
+                    }
+                };
+
                 // Serve static files (must be called twice per Microsoft docs)
-                dashboardApp.UseStaticFiles();
+                dashboardApp.UseStaticFiles(staticFileOptions);
                 dashboardApp.UseStaticFiles(pathPrefix);
 
                 dashboardApp.UseRouting();

@@ -2,7 +2,9 @@ using Microsoft.Extensions.Logging;
 using Orleans.Insights.Models;
 using Orleans.Runtime;
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -26,10 +28,13 @@ public sealed class SiloMetricsCollector : ILifecycleParticipant<ISiloLifecycle>
     private readonly ILogger<SiloMetricsCollector> _logger;
     private readonly string _hostName;
     private readonly Process _currentProcess;
+    private readonly ILocalSiloDetails _localSiloDetails;
 
     private Timer? _timer;
     private IInsightsGrain? _insightsGrain;
+    private IManagementGrain? _managementGrain;
     private string? _siloAddress;
+    private SiloAddress? _siloAddressParsed;
     private bool _disposed;
     private bool _isRunning;
 
@@ -43,12 +48,14 @@ public sealed class SiloMetricsCollector : ILifecycleParticipant<ISiloLifecycle>
         ILogger<SiloMetricsCollector> logger)
     {
         _grainFactory = grainFactory;
+        _localSiloDetails = localSiloDetails;
         _logger = logger;
         _hostName = Environment.MachineName;
         _currentProcess = Process.GetCurrentProcess();
 
         // Cache the silo address for reporting
-        _siloAddress = localSiloDetails.SiloAddress.ToParsableString();
+        _siloAddressParsed = localSiloDetails.SiloAddress;
+        _siloAddress = _siloAddressParsed.ToParsableString();
     }
 
     /// <summary>
@@ -97,20 +104,23 @@ public sealed class SiloMetricsCollector : ILifecycleParticipant<ISiloLifecycle>
         return Task.CompletedTask;
     }
 
-    private void CollectAndSendMetrics(object? state)
+    private async void CollectAndSendMetrics(object? state)
     {
         if (_disposed || !_isRunning) return;
 
         try
         {
-            var metrics = CollectMetrics();
+            var metrics = await CollectMetricsAsync();
 
             if (_logger.IsEnabled(LogLevel.Debug))
             {
+                var activationCount = metrics.GrainTypeMetrics.Values.Sum(g => g.Activations);
                 _logger.LogDebug(
-                    "Collected silo metrics: CPU={Cpu:F1}%, Memory={Memory}MB, Activations=N/A",
+                    "Collected silo metrics: CPU={Cpu:F1}%, Memory={Memory}MB, Activations={Activations}, GrainTypes={GrainTypes}",
                     metrics.ClusterMetrics.CpuUsagePercent,
-                    metrics.ClusterMetrics.MemoryUsageMb);
+                    metrics.ClusterMetrics.MemoryUsageMb,
+                    activationCount,
+                    metrics.GrainTypeMetrics.Count);
             }
 
             // Get or cache the InsightsGrain reference
@@ -125,7 +135,7 @@ public sealed class SiloMetricsCollector : ILifecycleParticipant<ISiloLifecycle>
         }
     }
 
-    private SiloMetricsReport CollectMetrics()
+    private async Task<SiloMetricsReport> CollectMetricsAsync()
     {
         var now = DateTime.UtcNow;
 
@@ -148,7 +158,6 @@ public sealed class SiloMetricsCollector : ILifecycleParticipant<ISiloLifecycle>
 
         // Get memory metrics
         var workingSetMb = _currentProcess.WorkingSet64 / (1024 * 1024);
-        var gcMemoryMb = GC.GetTotalMemory(false) / (1024 * 1024);
 
         // Get available system memory
         long availableMemoryMb = 0;
@@ -162,16 +171,52 @@ public sealed class SiloMetricsCollector : ILifecycleParticipant<ISiloLifecycle>
             // Fallback if GC info not available
         }
 
+        // Get grain activation statistics from IManagementGrain
+        var grainTypeMetrics = new Dictionary<string, SiloGrainTypeMetrics>();
+        long totalActivations = 0;
+
+        try
+        {
+            _managementGrain ??= _grainFactory.GetGrain<IManagementGrain>(0);
+
+            // Get detailed grain statistics for this silo only
+            var stats = await _managementGrain.GetDetailedGrainStatistics(
+                hostsIds: [_siloAddressParsed!]);
+
+            // Group by grain type and count activations
+            var activationCounts = new Dictionary<string, long>();
+            foreach (var stat in stats)
+            {
+                var grainType = GetShortGrainTypeName(stat.GrainType);
+                activationCounts.TryGetValue(grainType, out var count);
+                activationCounts[grainType] = count + 1;
+                totalActivations++;
+            }
+
+            // Create immutable SiloGrainTypeMetrics records
+            foreach (var (grainType, count) in activationCounts)
+            {
+                grainTypeMetrics[grainType] = new SiloGrainTypeMetrics
+                {
+                    GrainType = grainType,
+                    Activations = count,
+                    LastUpdated = now
+                };
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to get grain statistics from ManagementGrain");
+        }
+
         var clusterMetrics = new SiloClusterMetrics
         {
             CpuUsagePercent = cpuUsagePercent,
             MemoryUsageMb = workingSetMb,
             AvailableMemoryMb = availableMemoryMb,
-            // Note: Orleans-specific metrics like activations, messages, etc.
-            // would require access to internal Orleans statistics.
-            // For now, we provide process-level metrics.
-            // These can be extended when Orleans exposes more metrics APIs.
-            TotalActivations = 0,
+            TotalActivations = totalActivations,
+            // Note: Some Orleans-specific metrics like messages, connected clients
+            // are not easily accessible without hooking into internal statistics.
             ConnectedClients = 0,
             MessagesSent = 0,
             MessagesReceived = 0,
@@ -186,7 +231,7 @@ public sealed class SiloMetricsCollector : ILifecycleParticipant<ISiloLifecycle>
             ActivationShutdowns = 0,
             ActivationNonExistent = 0,
             ConcurrentRegistrationAttempts = 0,
-            GrainCount = 0,
+            GrainCount = totalActivations,
             SystemTargets = 0
         };
 
@@ -195,8 +240,28 @@ public sealed class SiloMetricsCollector : ILifecycleParticipant<ISiloLifecycle>
             SiloId = _siloAddress ?? _hostName,
             HostName = _hostName,
             Timestamp = now,
-            ClusterMetrics = clusterMetrics
+            ClusterMetrics = clusterMetrics,
+            GrainTypeMetrics = grainTypeMetrics
         };
+    }
+
+    /// <summary>
+    /// Gets the short grain type name from the full type string.
+    /// Handles both Orleans GrainType format and full type names.
+    /// </summary>
+    private static string GetShortGrainTypeName(string grainType)
+    {
+        // GrainType format: "GrainReference=0000000000000000030000009a706b87+MyApp.Grains.MyGrain"
+        // or just "MyApp.Grains.MyGrain"
+        var plusIndex = grainType.LastIndexOf('+');
+        if (plusIndex >= 0)
+        {
+            grainType = grainType[(plusIndex + 1)..];
+        }
+
+        // Get the simple name (after last dot)
+        var dotIndex = grainType.LastIndexOf('.');
+        return dotIndex >= 0 ? grainType[(dotIndex + 1)..] : grainType;
     }
 
     public void Dispose()
