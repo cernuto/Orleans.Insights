@@ -14,10 +14,11 @@
     --border: #333333;
     --radius: 6px;
 
-    /* Orleans theme colors */
-    --orleans-purple: #9b59b6;
-    --orleans-purple-light: #b877c8;
-    --orleans-purple-dark: #7b4d91;
+    /* Orleans Official theme colors */
+    --orleans-purple: #68217a;
+    --orleans-purple-light: #783988;
+    --orleans-purple-lighter: #8a4a9a;
+    --orleans-purple-dark: #5a1a6a;
     --orleans-orange: #e67e22;
     --orleans-orange-light: #f39c12;
     --orleans-red: #e74c3c;

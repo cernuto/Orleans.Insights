@@ -1,57 +1,60 @@
 using Microsoft.Extensions.Logging;
 using Orleans.Insights.Models;
 using Orleans.Runtime;
-using System;
-using System.Collections.Generic;
-using System.Diagnostics;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
 
 namespace Orleans.Insights.Instrumentation;
 
 /// <summary>
 /// Collects silo-level metrics and reports them to InsightsGrain.
+/// </summary>
+/// <remarks>
+/// <para>
 /// Runs on each silo and periodically sends SiloMetricsReport containing
 /// cluster metrics (CPU, memory, activations, etc.).
-///
+/// </para>
+/// <para>
 /// This complements GrainMethodProfiler which tracks per-method metrics.
 /// Together they provide complete observability:
-/// - SiloMetricsCollector: Silo health (CPU, memory, activations, messages)
-/// - GrainMethodProfiler: Method performance (latency, throughput, errors)
-///
-/// Uses ILifecycleParticipant for proper Orleans silo lifecycle integration.
-/// </summary>
+/// </para>
+/// <list type="bullet">
+/// <item>SiloMetricsCollector: Silo health (CPU, memory, activations, messages)</item>
+/// <item>GrainMethodProfiler: Method performance (latency, throughput, errors)</item>
+/// </list>
+/// <para>
+/// Uses OrleansMetricsListener to capture Orleans OTel metrics (latency, messages, etc.)
+/// with delta-based latency calculation for accurate display.
+/// </para>
+/// </remarks>
 public sealed class SiloMetricsCollector : ILifecycleParticipant<ISiloLifecycle>, IDisposable
 {
     private readonly IGrainFactory _grainFactory;
     private readonly ILogger<SiloMetricsCollector> _logger;
+    private readonly IOrleansMetricsListener _metricsListener;
     private readonly string _hostName;
-    private readonly Process _currentProcess;
-    private readonly ILocalSiloDetails _localSiloDetails;
+    private readonly string _siloAddress;
+    private readonly SiloAddress _siloAddressParsed;
 
     private Timer? _timer;
     private IInsightsGrain? _insightsGrain;
     private IManagementGrain? _managementGrain;
-    private string? _siloAddress;
-    private SiloAddress? _siloAddressParsed;
-    private bool _disposed;
-    private bool _isRunning;
-
-    // Counters for delta calculations
-    private long _lastTotalProcessorTime;
-    private DateTime _lastMeasurementTime;
+    private volatile bool _disposed;
+    private volatile bool _isRunning;
 
     public SiloMetricsCollector(
         IGrainFactory grainFactory,
         ILocalSiloDetails localSiloDetails,
+        IOrleansMetricsListener metricsListener,
         ILogger<SiloMetricsCollector> logger)
     {
+        ArgumentNullException.ThrowIfNull(grainFactory);
+        ArgumentNullException.ThrowIfNull(localSiloDetails);
+        ArgumentNullException.ThrowIfNull(metricsListener);
+        ArgumentNullException.ThrowIfNull(logger);
+
         _grainFactory = grainFactory;
-        _localSiloDetails = localSiloDetails;
+        _metricsListener = metricsListener;
         _logger = logger;
         _hostName = Environment.MachineName;
-        _currentProcess = Process.GetCurrentProcess();
 
         // Cache the silo address for reporting
         _siloAddressParsed = localSiloDetails.SiloAddress;
@@ -76,10 +79,6 @@ public sealed class SiloMetricsCollector : ILifecycleParticipant<ISiloLifecycle>
             _siloAddress, _hostName);
 
         _isRunning = true;
-
-        // Initialize baseline measurements
-        _lastTotalProcessorTime = _currentProcess.TotalProcessorTime.Ticks;
-        _lastMeasurementTime = DateTime.UtcNow;
 
         // Start timer to collect and send metrics every 5 seconds
         // Using 5-second interval for silo metrics (less frequent than method profiling)
@@ -139,39 +138,13 @@ public sealed class SiloMetricsCollector : ILifecycleParticipant<ISiloLifecycle>
     {
         var now = DateTime.UtcNow;
 
-        // Calculate CPU usage since last measurement
-        _currentProcess.Refresh();
-        var currentTotalProcessorTime = _currentProcess.TotalProcessorTime.Ticks;
-        var elapsedTime = (now - _lastMeasurementTime).TotalMilliseconds;
-
-        double cpuUsagePercent = 0;
-        if (elapsedTime > 0)
-        {
-            var cpuTimeDelta = currentTotalProcessorTime - _lastTotalProcessorTime;
-            var cpuTimeMs = TimeSpan.FromTicks(cpuTimeDelta).TotalMilliseconds;
-            cpuUsagePercent = (cpuTimeMs / elapsedTime / Environment.ProcessorCount) * 100;
-            cpuUsagePercent = Math.Min(100, Math.Max(0, cpuUsagePercent)); // Clamp to 0-100
-        }
-
-        _lastTotalProcessorTime = currentTotalProcessorTime;
-        _lastMeasurementTime = now;
-
-        // Get memory metrics
-        var workingSetMb = _currentProcess.WorkingSet64 / (1024 * 1024);
-
-        // Get available system memory
-        long availableMemoryMb = 0;
-        try
-        {
-            var gcMemoryInfo = GC.GetGCMemoryInfo();
-            availableMemoryMb = gcMemoryInfo.TotalAvailableMemoryBytes / (1024 * 1024);
-        }
-        catch
-        {
-            // Fallback if GC info not available
-        }
+        // Get Orleans OTel metrics from the listener (CPU, memory, latency, messages, etc.)
+        // Uses delta-based latency calculation for accurate display
+        var otelMetrics = _metricsListener.GetClusterMetrics();
 
         // Get grain activation statistics from IManagementGrain
+        // IMPORTANT: Use IManagementGrain for per-silo activation counts, not OTel
+        // OTel orleans-grains metric is cluster-wide and would cause double-counting
         var grainTypeMetrics = new Dictionary<string, SiloGrainTypeMetrics>();
         long totalActivations = 0;
 
@@ -181,7 +154,7 @@ public sealed class SiloMetricsCollector : ILifecycleParticipant<ISiloLifecycle>
 
             // Get detailed grain statistics for this silo only
             var stats = await _managementGrain.GetDetailedGrainStatistics(
-                hostsIds: [_siloAddressParsed!]);
+                hostsIds: [_siloAddressParsed]);
 
             // Group by grain type and count activations
             var activationCounts = new Dictionary<string, long>();
@@ -209,35 +182,39 @@ public sealed class SiloMetricsCollector : ILifecycleParticipant<ISiloLifecycle>
             _logger.LogDebug(ex, "Failed to get grain statistics from ManagementGrain");
         }
 
+        // Build cluster metrics combining OTel data with IManagementGrain activation count
         var clusterMetrics = new SiloClusterMetrics
         {
-            CpuUsagePercent = cpuUsagePercent,
-            MemoryUsageMb = workingSetMb,
-            AvailableMemoryMb = availableMemoryMb,
+            // CPU/memory from OrleansMetricsListener (delta-based, smoothed)
+            CpuUsagePercent = otelMetrics.CpuUsagePercent,
+            MemoryUsageMb = otelMetrics.MemoryUsageMb,
+            AvailableMemoryMb = otelMetrics.AvailableMemoryMb,
+            // Activations from IManagementGrain (per-silo, not cluster-wide)
             TotalActivations = totalActivations,
-            // Note: Some Orleans-specific metrics like messages, connected clients
-            // are not easily accessible without hooking into internal statistics.
-            ConnectedClients = 0,
-            MessagesSent = 0,
-            MessagesReceived = 0,
-            MessagesDropped = 0,
-            AverageRequestLatencyMs = 0,
-            TotalRequests = 0,
-            ActivationWorkingSet = 0,
-            ActivationsCreated = 0,
-            ActivationsDestroyed = 0,
-            ActivationsFailedToActivate = 0,
-            ActivationCollections = 0,
-            ActivationShutdowns = 0,
-            ActivationNonExistent = 0,
-            ConcurrentRegistrationAttempts = 0,
-            GrainCount = totalActivations,
-            SystemTargets = 0
+            // Orleans OTel metrics (messages, latency, etc.)
+            ConnectedClients = otelMetrics.ConnectedClients,
+            MessagesSent = otelMetrics.MessagesSent,
+            MessagesReceived = otelMetrics.MessagesReceived,
+            MessagesDropped = otelMetrics.MessagesDropped,
+            AverageRequestLatencyMs = otelMetrics.AverageRequestLatencyMs,
+            TotalRequests = otelMetrics.TotalRequests,
+            // Catalog metrics (activation lifecycle)
+            ActivationWorkingSet = otelMetrics.ActivationWorkingSet,
+            ActivationsCreated = otelMetrics.ActivationsCreated,
+            ActivationsDestroyed = otelMetrics.ActivationsDestroyed,
+            ActivationsFailedToActivate = otelMetrics.ActivationsFailedToActivate,
+            ActivationCollections = otelMetrics.ActivationCollections,
+            ActivationShutdowns = otelMetrics.ActivationShutdowns,
+            ActivationNonExistent = otelMetrics.ActivationNonExistent,
+            ConcurrentRegistrationAttempts = otelMetrics.ConcurrentRegistrationAttempts,
+            // Miscellaneous grain metrics
+            GrainCount = otelMetrics.GrainCount > 0 ? otelMetrics.GrainCount : totalActivations,
+            SystemTargets = otelMetrics.SystemTargets
         };
 
         return new SiloMetricsReport
         {
-            SiloId = _siloAddress ?? _hostName,
+            SiloId = _siloAddress,
             HostName = _hostName,
             Timestamp = now,
             ClusterMetrics = clusterMetrics,

@@ -3,63 +3,58 @@ using Orleans;
 using Orleans.Concurrency;
 using Orleans.Insights.Models;
 using Orleans.Runtime;
-using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
+using System.Runtime.InteropServices;
 
 namespace Orleans.Insights.Instrumentation;
 
 /// <summary>
 /// Grain method profiler that collects accurate per-method metrics using the OrleansDashboard pattern.
-///
-/// Key Design (from OrleansDashboard):
-/// - Uses atomic swap pattern: accumulates metrics, then atomically swaps the dictionary every second
-/// - Stores totals (count + elapsedTime) not averages - enables accurate average calculation: avg = total / count
-/// - Fire-and-forget reporting to InsightsGrain for DuckDB batch storage
-/// - Uses ILifecycleParticipant for proper Orleans silo lifecycle integration
-///
-/// This runs alongside the existing OTel instrumentation:
-/// - OTel meters (GrainInstrumentation): For external observability (Prometheus, Azure Monitor)
-/// - This profiler: For accurate dashboard display with proper aggregation via DuckDB
-///
-/// Thread Safety:
-/// - ConcurrentDictionary.AddOrUpdate is lock-free for high-throughput grain calls
-/// - Interlocked.Exchange provides atomic swap without blocking
-/// - Single timer thread processes stats, no contention with grain calls
-///
-/// Registration (in each silo):
-/// <code>
-/// siloBuilder.AddIncomingGrainCallFilter&lt;GlobalGrainCallFilter&gt;();
-/// siloBuilder.Services.AddSingleton&lt;GrainMethodProfiler&gt;();
-/// siloBuilder.Services.AddSingleton&lt;ILifecycleParticipant&lt;ISiloLifecycle&gt;&gt;(sp => sp.GetRequiredService&lt;GrainMethodProfiler&gt;());
-/// </code>
 /// </summary>
+/// <remarks>
+/// <para>
+/// Key Design (from OrleansDashboard):
+/// </para>
+/// <list type="bullet">
+/// <item>Uses atomic swap pattern: accumulates metrics, then atomically swaps the dictionary every second</item>
+/// <item>Stores totals (count + elapsedTime) not averages - enables accurate average calculation: avg = total / count</item>
+/// <item>Fire-and-forget reporting to InsightsGrain for DuckDB batch storage</item>
+/// <item>Uses ILifecycleParticipant for proper Orleans silo lifecycle integration</item>
+/// </list>
+/// <para>
+/// Thread Safety:
+/// </para>
+/// <list type="bullet">
+/// <item>ConcurrentDictionary.AddOrUpdate is lock-free for high-throughput grain calls</item>
+/// <item>Interlocked.Exchange provides atomic swap without blocking</item>
+/// <item>Single timer thread processes stats, no contention with grain calls</item>
+/// </list>
+/// </remarks>
 public sealed class GrainMethodProfiler : IGrainMethodProfiler, ILifecycleParticipant<ISiloLifecycle>, IDisposable
 {
     private readonly IGrainFactory _grainFactory;
     private readonly ILogger<GrainMethodProfiler> _logger;
     private readonly string _hostName;
+    private readonly string _siloAddress;
 
     private ConcurrentDictionary<string, MethodTraceEntry> _traces = new();
     private Timer? _timer;
     private IInsightsGrain? _insightsGrain;
-    private string? _siloAddress;
-    private bool _disposed;
-    private bool _isRunning;
+    private volatile bool _disposed;
+    private volatile bool _isRunning;
 
     public GrainMethodProfiler(
         IGrainFactory grainFactory,
         ILocalSiloDetails localSiloDetails,
         ILogger<GrainMethodProfiler> logger)
     {
+        ArgumentNullException.ThrowIfNull(grainFactory);
+        ArgumentNullException.ThrowIfNull(localSiloDetails);
+        ArgumentNullException.ThrowIfNull(logger);
+
         _grainFactory = grainFactory;
         _logger = logger;
         _hostName = Environment.MachineName;
-
-        // Cache the silo address for reporting
         _siloAddress = localSiloDetails.SiloAddress.ToParsableString();
     }
 
@@ -78,9 +73,8 @@ public sealed class GrainMethodProfiler : IGrainMethodProfiler, ILifecyclePartic
 
     /// <summary>
     /// Records a grain method call. Called from GlobalGrainCallFilter after each grain invocation.
-    ///
-    /// Performance: ~50-100ns overhead per call (ConcurrentDictionary.AddOrUpdate is lock-free)
     /// </summary>
+    /// <remarks>Performance: ~50-100ns overhead per call (ConcurrentDictionary.AddOrUpdate is lock-free)</remarks>
     /// <param name="grainType">Short grain type name (e.g., "Device" not "MyApp.Grains.DeviceGrain")</param>
     /// <param name="methodName">Method name (e.g., "GetState")</param>
     /// <param name="elapsedMs">Elapsed time in milliseconds</param>
@@ -89,28 +83,37 @@ public sealed class GrainMethodProfiler : IGrainMethodProfiler, ILifecyclePartic
     {
         if (!_isRunning) return;
 
-        var key = $"{grainType}::{methodName}";
+        var key = string.Create(grainType.Length + 2 + methodName.Length, (grainType, methodName), static (span, state) =>
+        {
+            var (grain, method) = state;
+            grain.AsSpan().CopyTo(span);
+            span[grain.Length] = ':';
+            span[grain.Length + 1] = ':';
+            method.AsSpan().CopyTo(span[(grain.Length + 2)..]);
+        });
+
         var exceptionCount = failed ? 1L : 0L;
 
         _traces.AddOrUpdate(
             key,
-            // Factory for new entry
-            _ => new MethodTraceEntry
+            // Factory for new entry - capture values for closure
+            static (_, args) => new MethodTraceEntry
             {
-                GrainType = grainType,
-                Method = methodName,
+                GrainType = args.grainType,
+                Method = args.methodName,
                 Count = 1,
-                ElapsedTime = elapsedMs,
-                ExceptionCount = exceptionCount
+                ElapsedTime = args.elapsedMs,
+                ExceptionCount = args.exceptionCount
             },
             // Update existing entry (accumulate totals)
-            (_, existing) =>
+            static (_, existing, args) =>
             {
                 existing.Count++;
-                existing.ElapsedTime += elapsedMs;
-                existing.ExceptionCount += exceptionCount;
+                existing.ElapsedTime += args.elapsedMs;
+                existing.ExceptionCount += args.exceptionCount;
                 return existing;
-            });
+            },
+            (grainType, methodName, elapsedMs, exceptionCount));
     }
 
     private Task OnStart(CancellationToken cancellationToken)
@@ -160,19 +163,12 @@ public sealed class GrainMethodProfiler : IGrainMethodProfiler, ILifecyclePartic
             if (currentTraces.IsEmpty)
                 return;
 
-            var entries = currentTraces.Values.ToArray();
+            // Use CollectionsMarshal for zero-copy iteration over dictionary values
+            var entriesSpan = CollectionsMarshal.AsSpan(currentTraces.Values.ToList());
 
-            if (_logger.IsEnabled(LogLevel.Debug))
-            {
-                _logger.LogDebug(
-                    "Processing {Count} method traces: {Samples}",
-                    entries.Length,
-                    string.Join(", ", entries.Take(5).Select(e => $"{e.GrainType}.{e.Method}={e.Count}")));
-            }
-
-            // Build the report entries
-            var reportEntries = new List<MethodProfileEntry>(entries.Length);
-            foreach (var e in entries)
+            // Build the report entries with pre-allocated capacity
+            var reportEntries = new List<MethodProfileEntry>(entriesSpan.Length);
+            foreach (ref readonly var e in entriesSpan)
             {
                 reportEntries.Add(new MethodProfileEntry
                 {
@@ -187,7 +183,7 @@ public sealed class GrainMethodProfiler : IGrainMethodProfiler, ILifecyclePartic
             // Build the report
             var report = new MethodProfileReport
             {
-                SiloId = _siloAddress ?? _hostName,
+                SiloId = _siloAddress,
                 HostName = _hostName,
                 Timestamp = DateTime.UtcNow,
                 Entries = reportEntries
@@ -204,6 +200,18 @@ public sealed class GrainMethodProfiler : IGrainMethodProfiler, ILifecyclePartic
         {
             _logger.LogWarning(ex, "Error processing grain method stats");
         }
+    }
+
+    private static string FormatTraceSamples(ReadOnlySpan<MethodTraceEntry> entries)
+    {
+        var sampleCount = Math.Min(5, entries.Length);
+        var samples = new string[sampleCount];
+        for (var i = 0; i < sampleCount; i++)
+        {
+            ref readonly var e = ref entries[i];
+            samples[i] = $"{e.GrainType}.{e.Method}={e.Count}, elapsed={e.ElapsedTime:F2}ms";
+        }
+        return string.Join(", ", samples);
     }
 
     public void Dispose()

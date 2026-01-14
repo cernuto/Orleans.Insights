@@ -21,13 +21,12 @@ namespace Orleans.Insights.Dashboard.Hubs;
 /// <item>Request immediate data fetch (initial load or manual refresh)</item>
 /// </list>
 /// </remarks>
-public sealed class DashboardHub : Hub
+public sealed class DashboardHub(
+    IClusterClient clusterClient,
+    IConfiguration configuration,
+    ILogger<DashboardHub> logger) : Hub
 {
-    private readonly IClusterClient _clusterClient;
-    private readonly IConfiguration _configuration;
-    private readonly ILogger<DashboardHub> _logger;
-
-    // Cached JSON options for serialization
+    // Cached JSON options for serialization using source generators would be ideal for .NET 10
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -35,37 +34,27 @@ public sealed class DashboardHub : Hub
     };
 
     // Frozen set of sensitive configuration keys (fast lookup, thread-safe, allocated once)
-    private static readonly FrozenSet<string> SensitiveKeys = new[]
-    {
+    private static readonly FrozenSet<string> SensitiveKeys = FrozenSet.ToFrozenSet(
+    [
         "ConnectionStrings",
         "Secret",
         "Password",
         "Token",
         "ApiKey",
         "ConnectionString"
-    }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
-
-    public DashboardHub(
-        IClusterClient clusterClient,
-        IConfiguration configuration,
-        ILogger<DashboardHub> logger)
-    {
-        _clusterClient = clusterClient;
-        _configuration = configuration;
-        _logger = logger;
-    }
+    ], StringComparer.OrdinalIgnoreCase);
 
     #region Connection Lifecycle
 
     public override Task OnConnectedAsync()
     {
-        _logger.LogInformation("Dashboard client connected: {ConnectionId}", Context.ConnectionId);
+        logger.LogInformation("Dashboard client connected: {ConnectionId}", Context.ConnectionId);
         return base.OnConnectedAsync();
     }
 
     public override Task OnDisconnectedAsync(Exception? exception)
     {
-        _logger.LogInformation(
+        logger.LogInformation(
             "Dashboard client disconnected: {ConnectionId}, Exception: {Exception}",
             Context.ConnectionId,
             exception?.Message);
@@ -84,7 +73,7 @@ public sealed class DashboardHub : Hub
     {
         var normalizedPage = pageName.ToLowerInvariant();
         await Groups.AddToGroupAsync(Context.ConnectionId, normalizedPage);
-        _logger.LogDebug("Client {ConnectionId} subscribed to: {Page}", Context.ConnectionId, normalizedPage);
+        logger.LogDebug("Client {ConnectionId} subscribed to: {Page}", Context.ConnectionId, normalizedPage);
 
         // Send initial data immediately
         try
@@ -97,7 +86,7 @@ public sealed class DashboardHub : Hub
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to send initial data for page: {Page}", normalizedPage);
+            logger.LogWarning(ex, "Failed to send initial data for page: {Page}", normalizedPage);
         }
     }
 
@@ -108,7 +97,7 @@ public sealed class DashboardHub : Hub
     {
         var normalizedPage = pageName.ToLowerInvariant();
         await Groups.RemoveFromGroupAsync(Context.ConnectionId, normalizedPage);
-        _logger.LogDebug("Client {ConnectionId} unsubscribed from: {Page}", Context.ConnectionId, normalizedPage);
+        logger.LogDebug("Client {ConnectionId} unsubscribed from: {Page}", Context.ConnectionId, normalizedPage);
     }
 
     #endregion
@@ -118,7 +107,7 @@ public sealed class DashboardHub : Hub
     /// <summary>Get Overview page data immediately.</summary>
     public async Task<JsonElement> GetOverviewPageData()
     {
-        var grain = _clusterClient.GetGrain<IInsightsGrain>(IInsightsGrain.SingletonKey);
+        var grain = clusterClient.GetGrain<IInsightsGrain>(IInsightsGrain.SingletonKey);
         var data = await grain.GetOverviewPageData();
         return JsonSerializer.SerializeToElement(data, JsonOptions);
     }
@@ -126,7 +115,7 @@ public sealed class DashboardHub : Hub
     /// <summary>Get Orleans page data immediately.</summary>
     public async Task<JsonElement> GetOrleansPageData()
     {
-        var grain = _clusterClient.GetGrain<IInsightsGrain>(IInsightsGrain.SingletonKey);
+        var grain = clusterClient.GetGrain<IInsightsGrain>(IInsightsGrain.SingletonKey);
         var data = await grain.GetOrleansPageData();
         return JsonSerializer.SerializeToElement(data, JsonOptions);
     }
@@ -134,7 +123,7 @@ public sealed class DashboardHub : Hub
     /// <summary>Get Insights page data immediately.</summary>
     public async Task<JsonElement> GetInsightsPageData()
     {
-        var grain = _clusterClient.GetGrain<IInsightsGrain>(IInsightsGrain.SingletonKey);
+        var grain = clusterClient.GetGrain<IInsightsGrain>(IInsightsGrain.SingletonKey);
         var data = await grain.GetInsightsPageData();
         return JsonSerializer.SerializeToElement(data, JsonOptions);
     }
@@ -143,7 +132,7 @@ public sealed class DashboardHub : Hub
     public Task<JsonElement> GetSettingsPageData()
     {
         var configDict = new Dictionary<string, object?>();
-        BuildConfigDictionary(_configuration, configDict);
+        BuildConfigDictionary(configuration, configDict);
         return Task.FromResult(JsonSerializer.SerializeToElement(configDict, JsonOptions));
     }
 
@@ -154,11 +143,11 @@ public sealed class DashboardHub : Hub
         double durationSeconds = 300,
         int bucketSeconds = 1)
     {
-        _logger.LogDebug(
+        logger.LogDebug(
             "GetMethodProfileTrend: grainType={GrainType}, method={MethodName}, duration={Duration}s",
             grainType, methodName, durationSeconds);
 
-        var grain = _clusterClient.GetGrain<IInsightsGrain>(IInsightsGrain.SingletonKey);
+        var grain = clusterClient.GetGrain<IInsightsGrain>(IInsightsGrain.SingletonKey);
         var effectiveDuration = TimeSpan.FromSeconds(durationSeconds);
 
         // Route to the appropriate method based on parameters

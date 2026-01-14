@@ -1,4 +1,5 @@
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Orleans.Hosting;
 using Orleans.Insights.Instrumentation;
 using Orleans.Runtime;
@@ -44,6 +45,13 @@ public static class InsightsExtensions
         {
             services.Configure<InsightsOptions>(_ => { });
         }
+
+        // Register OrleansMetricsListener as IHostedService to ensure it starts BEFORE Orleans
+        // MeterListener only captures instruments published AFTER it starts, so timing is critical
+        // Uses delta-based latency calculation for accurate display
+        services.AddSingleton<OrleansMetricsListener>();
+        services.AddSingleton<IOrleansMetricsListener>(sp => sp.GetRequiredService<OrleansMetricsListener>());
+        services.AddSingleton<IHostedService>(sp => sp.GetRequiredService<OrleansMetricsListener>());
 
         // Register the grain method profiler as singleton with all required interfaces
         services.AddSingleton<GrainMethodProfiler>();

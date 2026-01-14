@@ -108,14 +108,14 @@ internal sealed class InsightsMetricsBuffer
                 mm.AverageLatencyMs, mm.RequestsPerSecond));
         }
 
-        // Buffer grain type activations (from orleans-grains metric with grain.type tag)
+        // Buffer grain type activations from IManagementGrain data
+        // IMPORTANT: Always write activation records (even 0) to overwrite stale data
+        // This ensures that when a grain moves to another silo, the old silo's stale
+        // activation count is replaced with 0 rather than persisting forever.
         foreach (var (grainType, gm) in metrics.GrainTypeMetrics)
         {
-            if (gm.Activations > 0)
-            {
-                _grainTypeActivationBuffer.Add(new GrainTypeActivationRecord(
-                    timestamp, siloId, grainType, gm.Activations));
-            }
+            _grainTypeActivationBuffer.Add(new GrainTypeActivationRecord(
+                timestamp, siloId, grainType, gm.Activations));
         }
     }
 

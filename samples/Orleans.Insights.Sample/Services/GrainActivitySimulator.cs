@@ -105,10 +105,24 @@ public class GrainActivitySimulator : BackgroundService
         }
     }
 
+    // Counter for order IDs - grows slowly over time
+    private static int _orderCounter;
+
     private async Task SimulateOrderProcessingAsync()
     {
-        // Process orders with new grain instances
-        var orderId = Guid.NewGuid();
+        // 80% chance to reuse an existing order ID, 20% chance to create a new one
+        // This creates realistic growth that slows as more orders exist
+        Guid orderId;
+        if (_orderCounter > 0 && _random.Next(100) < 80)
+        {
+            // Reuse an existing order ID
+            orderId = Guid.Parse($"00000000-0000-0000-0000-{_random.Next(_orderCounter):D12}");
+        }
+        else
+        {
+            // Create a new order (slow growth)
+            orderId = Guid.Parse($"00000000-0000-0000-0000-{Interlocked.Increment(ref _orderCounter):D12}");
+        }
         var processor = _clusterClient.GetGrain<IOrderProcessorGrain>(orderId);
 
         var product = Products[_random.Next(Products.Length)];

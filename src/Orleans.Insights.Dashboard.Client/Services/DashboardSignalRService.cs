@@ -66,16 +66,11 @@ public sealed class DashboardSignalRService : IDashboardDataService
         // Build hub URL from NavigationManager base URI
         var hubUrl = new Uri(new Uri(_navigationManager.BaseUri), "hub");
 
-        // Configure SignalR with automatic reconnection
+        // Configure SignalR with automatic reconnection using infinite instant retry
+        // This ensures the dashboard stays connected even with intermittent network issues
         _hubConnection = new HubConnectionBuilder()
             .WithUrl(hubUrl)
-            .WithAutomaticReconnect([
-                TimeSpan.Zero,
-                TimeSpan.FromSeconds(2),
-                TimeSpan.FromSeconds(5),
-                TimeSpan.FromSeconds(10),
-                TimeSpan.FromSeconds(30)
-            ])
+            .WithAutomaticReconnect(new InfiniteInstantRetryPolicy())
             .Build();
 
         // Register handlers for server-pushed page data
@@ -395,4 +390,14 @@ public sealed class DashboardSignalRService : IDashboardDataService
     }
 
     #endregion
+}
+
+/// <summary>
+/// Retry policy that retries immediately and infinitely.
+/// Always returns TimeSpan.Zero to retry instantly without giving up.
+/// Better UX for monitoring dashboards that need to stay connected.
+/// </summary>
+file class InfiniteInstantRetryPolicy : IRetryPolicy
+{
+    public TimeSpan? NextRetryDelay(RetryContext retryContext) => TimeSpan.Zero;
 }

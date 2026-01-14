@@ -169,6 +169,15 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
         var reportValue = report.Value;
         try
         {
+            // Log first few entries to verify TotalElapsedMs is being received correctly after serialization
+            if (reportValue.Entries.Count > 0)
+            {
+                var firstEntry = reportValue.Entries[0];
+                _logger.LogInformation(
+                    "[IngestMethodProfile] First entry: {GrainType}.{Method} Count={Count} TotalElapsedMs={TotalElapsedMs:F3}",
+                    firstEntry.GrainType, firstEntry.Method, firstEntry.Count, firstEntry.TotalElapsedMs);
+            }
+
             Buffer.BufferMethodProfile(reportValue);
 
             if (Buffer.ShouldFlush())
@@ -253,24 +262,22 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
 
         // Query from method_profile table (populated by GrainMethodProfiler) instead of grain_metrics
         // This is where actual grain call data is stored
+        // Uses NULLIF for division-by-zero handling (DuckDB idiom) and HAVING to filter empty grains
         var sql = $"""
             SELECT
                 grain_type,
                 SUM(call_count) as total_requests,
                 SUM(exception_count) as failed_requests,
-                CASE WHEN SUM(call_count) > 0
-                     THEN SUM(total_elapsed_ms) / SUM(call_count)
-                     ELSE 0 END as avg_latency,
-                MIN(CASE WHEN call_count > 0 THEN total_elapsed_ms / call_count ELSE NULL END) as min_latency,
-                MAX(CASE WHEN call_count > 0 THEN total_elapsed_ms / call_count ELSE NULL END) as max_latency,
-                SUM(call_count) / {windowSeconds:F2} as rps,
-                CASE WHEN SUM(call_count) > 0
-                     THEN (SUM(exception_count)::DOUBLE / SUM(call_count)) * 100
-                     ELSE 0 END as error_rate,
+                SUM(total_elapsed_ms) / NULLIF(SUM(call_count), 0) as avg_latency,
+                MIN(total_elapsed_ms / NULLIF(call_count, 0)) as min_latency,
+                MAX(total_elapsed_ms / NULLIF(call_count, 0)) as max_latency,
+                SUM(call_count) / {windowSeconds:F1} as rps,
+                (SUM(exception_count)::DOUBLE / NULLIF(SUM(call_count), 0)) * 100 as error_rate,
                 COUNT(DISTINCT silo_id) as silo_count
             FROM method_profile
             WHERE timestamp >= $1
             GROUP BY grain_type
+            HAVING SUM(call_count) > 0
             ORDER BY {orderBy}
             LIMIT {count}
             """;
@@ -317,23 +324,21 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
         };
 
         // Query from method_profile table (populated by GrainMethodProfiler) instead of method_metrics
+        // Uses NULLIF for division-by-zero handling and HAVING to filter empty methods
         var sql = $"""
             SELECT
                 grain_type,
                 method_name,
                 SUM(call_count) as total_requests,
                 SUM(exception_count) as failed_requests,
-                CASE WHEN SUM(call_count) > 0
-                     THEN SUM(total_elapsed_ms) / SUM(call_count)
-                     ELSE 0 END as avg_latency,
-                SUM(call_count) / {windowSeconds:F2} as rps,
-                CASE WHEN SUM(call_count) > 0
-                     THEN (SUM(exception_count)::DOUBLE / SUM(call_count)) * 100
-                     ELSE 0 END as error_rate,
+                SUM(total_elapsed_ms) / NULLIF(SUM(call_count), 0) as avg_latency,
+                SUM(call_count) / {windowSeconds:F1} as rps,
+                (SUM(exception_count)::DOUBLE / NULLIF(SUM(call_count), 0)) * 100 as error_rate,
                 COUNT(DISTINCT silo_id) as silo_count
             FROM method_profile
             WHERE timestamp >= $1
             GROUP BY grain_type, method_name
+            HAVING SUM(call_count) > 0
             ORDER BY {orderBy}
             LIMIT {count}
             """;
@@ -367,14 +372,13 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
         var cutoff = DateTime.UtcNow - duration;
 
         // Query from method_profile table using accurate totals calculation
+        // Uses NULLIF for division-by-zero handling (DuckDB idiom)
         var sql = $"""
             SELECT
                 time_bucket(INTERVAL '{bucketSeconds} seconds', timestamp) as bucket,
-                CASE WHEN SUM(call_count) > 0
-                     THEN SUM(total_elapsed_ms) / SUM(call_count)
-                     ELSE 0 END as avg_latency,
-                MIN(CASE WHEN call_count > 0 THEN total_elapsed_ms / call_count ELSE NULL END) as min_latency,
-                MAX(CASE WHEN call_count > 0 THEN total_elapsed_ms / call_count ELSE NULL END) as max_latency,
+                SUM(total_elapsed_ms) / NULLIF(SUM(call_count), 0) as avg_latency,
+                MIN(total_elapsed_ms / NULLIF(call_count, 0)) as min_latency,
+                MAX(total_elapsed_ms / NULLIF(call_count, 0)) as max_latency,
                 SUM(call_count) as request_count,
                 SUM(call_count) / {bucketSeconds}.0 as rps
             FROM method_profile
@@ -404,14 +408,13 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
         var cutoff = DateTime.UtcNow - duration;
 
         // Query from method_profile table using accurate totals calculation
+        // Uses NULLIF for division-by-zero handling (DuckDB idiom)
         var sql = $"""
             SELECT
                 time_bucket(INTERVAL '{bucketSeconds} seconds', timestamp) as bucket,
-                CASE WHEN SUM(call_count) > 0
-                     THEN SUM(total_elapsed_ms) / SUM(call_count)
-                     ELSE 0 END as avg_latency,
-                MIN(CASE WHEN call_count > 0 THEN total_elapsed_ms / call_count ELSE NULL END) as min_latency,
-                MAX(CASE WHEN call_count > 0 THEN total_elapsed_ms / call_count ELSE NULL END) as max_latency,
+                SUM(total_elapsed_ms) / NULLIF(SUM(call_count), 0) as avg_latency,
+                MIN(total_elapsed_ms / NULLIF(call_count, 0)) as min_latency,
+                MAX(total_elapsed_ms / NULLIF(call_count, 0)) as max_latency,
                 SUM(call_count) as request_count,
                 SUM(call_count) / {bucketSeconds}.0 as rps
             FROM method_profile
@@ -443,24 +446,23 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
         var baselineCutoff = now - baselineWindow;
 
         // Detect latency anomalies for grain types using method_profile table
+        // Uses NULLIF for division-by-zero handling (DuckDB idiom)
         var latencyAnomalySql = """
             WITH recent AS (
                 SELECT grain_type,
-                       CASE WHEN SUM(call_count) > 0
-                            THEN SUM(total_elapsed_ms) / SUM(call_count)
-                            ELSE 0 END as current_latency
+                       SUM(total_elapsed_ms) / NULLIF(SUM(call_count), 0) as current_latency
                 FROM method_profile
                 WHERE timestamp >= $1
                 GROUP BY grain_type
+                HAVING SUM(call_count) > 0
             ),
             baseline AS (
                 SELECT grain_type,
-                       CASE WHEN SUM(call_count) > 0
-                            THEN SUM(total_elapsed_ms) / SUM(call_count)
-                            ELSE 0 END as baseline_latency
+                       SUM(total_elapsed_ms) / NULLIF(SUM(call_count), 0) as baseline_latency
                 FROM method_profile
                 WHERE timestamp >= $2 AND timestamp < $1
                 GROUP BY grain_type
+                HAVING SUM(call_count) > 0
             )
             SELECT
                 r.grain_type,
@@ -486,32 +488,29 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
         }).ToList();
 
         // Detect error rate anomalies using method_profile table
+        // Uses NULLIF for division-by-zero handling (DuckDB idiom)
         var errorAnomalySql = """
             WITH recent AS (
                 SELECT grain_type,
-                       CASE WHEN SUM(call_count) > 0
-                            THEN (SUM(exception_count)::DOUBLE / SUM(call_count)) * 100
-                            ELSE 0 END as current_error_rate
+                       (SUM(exception_count)::DOUBLE / NULLIF(SUM(call_count), 0)) * 100 as current_error_rate
                 FROM method_profile
                 WHERE timestamp >= $1
                 GROUP BY grain_type
+                HAVING SUM(call_count) > 0
             ),
             baseline AS (
                 SELECT grain_type,
-                       CASE WHEN SUM(call_count) > 0
-                            THEN (SUM(exception_count)::DOUBLE / SUM(call_count)) * 100
-                            ELSE 0 END as baseline_error_rate
+                       (SUM(exception_count)::DOUBLE / NULLIF(SUM(call_count), 0)) * 100 as baseline_error_rate
                 FROM method_profile
                 WHERE timestamp >= $2 AND timestamp < $1
                 GROUP BY grain_type
+                HAVING SUM(call_count) > 0
             )
             SELECT
                 r.grain_type,
                 r.current_error_rate,
                 b.baseline_error_rate,
-                CASE WHEN b.baseline_error_rate > 0
-                     THEN r.current_error_rate / b.baseline_error_rate
-                     ELSE 0 END as deviation
+                r.current_error_rate / NULLIF(b.baseline_error_rate, 0) as deviation
             FROM recent r
             JOIN baseline b ON r.grain_type = b.grain_type
             WHERE r.current_error_rate > 1
@@ -804,14 +803,15 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
         var now = DateTime.UtcNow;
         var windowSeconds = (now - cutoff).TotalSeconds;
 
+        // Uses NULLIF for division-by-zero handling (DuckDB idiom)
         var sql = """
             SELECT
                 grain_type,
                 SUM(call_count) as total_calls,
                 SUM(total_elapsed_ms) as total_elapsed,
                 SUM(exception_count) as total_exceptions,
-                MIN(CASE WHEN call_count > 0 THEN total_elapsed_ms / call_count ELSE NULL END) as min_latency,
-                MAX(CASE WHEN call_count > 0 THEN total_elapsed_ms / call_count ELSE NULL END) as max_latency,
+                MIN(total_elapsed_ms / NULLIF(call_count, 0)) as min_latency,
+                MAX(total_elapsed_ms / NULLIF(call_count, 0)) as max_latency,
                 COUNT(DISTINCT silo_id) as silo_count,
                 MAX(timestamp) as last_updated
             FROM method_profile
@@ -856,6 +856,8 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
         // Query per-grain-type total activations (sum across all silos)
         // Note: grain_type_activations stores "Namespace.TypeName,AssemblyName" format
         // while method_profile stores "Namespace.TypeName" format (Type.FullName without assembly)
+        // IMPORTANT: Only include data from silos that have reported within the last 30 seconds.
+        // This prevents stale data from appearing when grains move between silos.
         var activationsSql = """
             WITH latest AS (
                 SELECT grain_type, silo_id, MAX(timestamp) as max_ts
@@ -866,6 +868,7 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
             SELECT a.grain_type, SUM(a.activations) as total_activations
             FROM grain_type_activations a
             INNER JOIN latest l ON a.grain_type = l.grain_type AND a.silo_id = l.silo_id AND a.timestamp = l.max_ts
+            WHERE l.max_ts >= now() - INTERVAL '30 seconds'
             GROUP BY a.grain_type
             """;
 
@@ -1121,6 +1124,8 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
         // Get the latest activation count per grain type per silo
         // Note: grain_type_activations stores "Namespace.TypeName,AssemblyName" format
         // while method_profile stores "Namespace.TypeName" format
+        // IMPORTANT: Only include data from silos that have reported within the last 30 seconds.
+        // This prevents stale data from appearing when grains move between silos.
         var activationsSql = """
             WITH latest AS (
                 SELECT grain_type, silo_id, MAX(timestamp) as max_ts
@@ -1131,6 +1136,7 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
             SELECT a.grain_type, a.silo_id, a.activations
             FROM grain_type_activations a
             INNER JOIN latest l ON a.grain_type = l.grain_type AND a.silo_id = l.silo_id AND a.timestamp = l.max_ts
+            WHERE l.max_ts >= now() - INTERVAL '30 seconds'
             """;
 
         var activationResults = Database.Query(activationsSql, cutoff);

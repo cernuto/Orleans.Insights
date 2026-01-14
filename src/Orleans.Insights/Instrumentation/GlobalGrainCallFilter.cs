@@ -39,38 +39,22 @@ namespace Orleans.Insights.Instrumentation;
 /// </code>
 /// </para>
 /// </remarks>
-public sealed class GlobalGrainCallFilter : IIncomingGrainCallFilter
+public sealed class GlobalGrainCallFilter(IGrainMethodProfiler profiler) : IIncomingGrainCallFilter
 {
-    private readonly IGrainMethodProfiler? _profiler;
-
-    /// <summary>
-    /// Constructor for DI - profiler is optional for backward compatibility.
-    /// </summary>
-    /// <param name="profiler">Optional profiler for dashboard metrics. If null, only OTel metrics are recorded.</param>
-    public GlobalGrainCallFilter(IGrainMethodProfiler? profiler = null)
-    {
-        _profiler = profiler;
-    }
+    private readonly IGrainMethodProfiler _profiler = profiler ?? throw new ArgumentNullException(nameof(profiler));
 
     /// <summary>
     /// Intercepts all grain method calls and records metrics.
     /// </summary>
     public async Task Invoke(IIncomingGrainCallContext context)
     {
+        // Use the actual grain implementation type (not the interface)
         var grainType = context.Grain.GetType();
-
-        // Skip instrumentation for Orleans system grains
-        if (!GrainTypeNameCache.ShouldInstrumentGrain(grainType))
-        {
-            await context.Invoke();
-            return;
-        }
-
         var methodName = context.ImplementationMethod?.Name ?? context.InterfaceMethod?.Name ?? "Unknown";
         var grainTypeName = GrainTypeNameCache.GetGrainTypeName(grainType);
         var grainTypeTag = GrainTypeNameCache.GetGrainTypeTag(grainType);
         var methodTag = new KeyValuePair<string, object?>("rpc.method", methodName);
-        var startTime = Stopwatch.GetTimestamp();
+        var sw = Stopwatch.StartNew();
         var failed = false;
 
         try
@@ -84,7 +68,8 @@ public sealed class GlobalGrainCallFilter : IIncomingGrainCallFilter
         }
         finally
         {
-            var elapsedMs = Stopwatch.GetElapsedTime(startTime).TotalMilliseconds;
+            sw.Stop();
+            var elapsedMs = sw.Elapsed.TotalMilliseconds;
 
             // 1. Record to OTel meters (for external observability)
             if (failed)
@@ -99,7 +84,7 @@ public sealed class GlobalGrainCallFilter : IIncomingGrainCallFilter
 
             // 2. Record to GrainMethodProfiler (for accurate dashboard display)
             // Uses OrleansDashboard pattern: accumulate totals, atomic swap every second
-            _profiler?.Track(grainTypeName, methodName, elapsedMs, failed);
+            _profiler.Track(grainTypeName, methodName, elapsedMs, failed);
         }
     }
 }

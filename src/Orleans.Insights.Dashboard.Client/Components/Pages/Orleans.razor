@@ -10,7 +10,7 @@
     @if (SelectedGrainType != null)
     {
         <div style="margin-top: 0.5rem;">
-            <span style="color: var(--success);">Selected: @GetShortTypeName(SelectedGrainType)</span>
+            <span style="color: var(--success);">Selected: @GetDisplayGrainName(SelectedGrainType)</span>
         </div>
     }
     <div class="refresh-indicator">
@@ -256,16 +256,21 @@
                 {
                     var grainType = stat.GrainType;
                     var isSelected = grainType.Equals(SelectedGrainType, StringComparison.OrdinalIgnoreCase);
+                    var grainCategory = GetGrainTypeCategory(grainType);
                     <tr @onclick="() => SelectGrainByType(grainType)"
                         class="@(isSelected ? "selected" : "")"
                         style="cursor: pointer;">
                         <td>
-                            <span class="font-mono grain-name">@GetShortTypeName(stat.GrainType)</span>
+                            <span class="font-mono grain-name">@GetDisplayGrainName(stat.GrainType)</span>
+                            @if (grainCategory.HasValue)
+                            {
+                                <span class="grain-tag @grainCategory.Value.CssClass">@grainCategory.Value.Label</span>
+                            }
                         </td>
                         <td class="text-right">@FormatActivations(stat.TotalActivations)</td>
                         <td class="text-right">@stat.ExceptionRate.ToString("F2") %</td>
                         <td class="text-right">@stat.RequestsPerSecond.ToString("F2") <span class="text-muted">req/sec</span></td>
-                        <td class="text-right">@stat.AverageLatencyMs.ToString("F2") <span class="text-muted">ms/req</span></td>
+                        <td class="text-right" title="Raw value: @stat.AverageLatencyMs">@stat.AverageLatencyMs.ToString("F2") <span class="text-muted">ms/req</span></td>
                     </tr>
                 }
             </tbody>
@@ -280,10 +285,15 @@
 <!-- Method Profiling Section -->
 @if (SelectedGrainType != null && SelectedGrainStats != null)
 {
+    var selectedCategory = GetGrainTypeCategory(SelectedGrainType);
     <div class="card orleans-card">
         <div class="card-header">
             <span class="card-title">
-                <span class="grain-detail-name">@GetShortTypeName(SelectedGrainType)</span>
+                <span class="grain-detail-name">@GetDisplayGrainName(SelectedGrainType)</span>
+                @if (selectedCategory.HasValue)
+                {
+                    <span class="grain-tag @selectedCategory.Value.CssClass">@selectedCategory.Value.Label</span>
+                }
                 <span class="text-muted grain-full-name">@SelectedGrainType</span>
             </span>
             <button class="close-btn" @onclick="ClearSelection" title="Close">
@@ -349,7 +359,7 @@
             </div>
 
             @{
-                var grainMethods = _data.TopMethods.Where(m => GetShortTypeName(m.GrainType) == GetShortTypeName(SelectedGrainType)).ToList();
+                var grainMethods = _data.TopMethods.Where(m => GrainTypesMatch(m.GrainType, SelectedGrainType)).ToList();
             }
             @if (grainMethods.Count > 0)
             {
@@ -563,6 +573,49 @@
 
     .grain-name {
         color: var(--text-primary);
+    }
+
+    /* Grain type tags - dark theme semi-transparent badges */
+    .grain-tag {
+        display: inline-block;
+        font-size: 0.65rem;
+        padding: 0.15rem 0.4rem;
+        margin-left: 0.5rem;
+        border-radius: 3px;
+        font-weight: 500;
+        text-transform: uppercase;
+        letter-spacing: 0.3px;
+        vertical-align: middle;
+    }
+
+    .grain-tag-system {
+        background-color: rgba(156, 39, 176, 0.2);
+        color: #ce93d8;
+        border: 1px solid rgba(156, 39, 176, 0.4);
+    }
+
+    .grain-tag-dashboard {
+        background-color: rgba(33, 150, 243, 0.2);
+        color: #90caf9;
+        border: 1px solid rgba(33, 150, 243, 0.4);
+    }
+
+    .grain-tag-observer {
+        background-color: rgba(255, 152, 0, 0.2);
+        color: #ffcc80;
+        border: 1px solid rgba(255, 152, 0, 0.4);
+    }
+
+    .grain-tag-storage {
+        background-color: rgba(76, 175, 80, 0.2);
+        color: #a5d6a7;
+        border: 1px solid rgba(76, 175, 80, 0.4);
+    }
+
+    .grain-tag-stream {
+        background-color: rgba(233, 30, 99, 0.2);
+        color: #f48fb1;
+        border: 1px solid rgba(233, 30, 99, 0.4);
     }
 
     /* Grain detail section */
@@ -922,8 +975,8 @@
         var sorted = _sortColumn switch
         {
             "Grain" => _sortDescending
-                ? filtered.OrderByDescending(g => GetShortTypeName(g.GrainType))
-                : filtered.OrderBy(g => GetShortTypeName(g.GrainType)),
+                ? filtered.OrderByDescending(g => GetDisplayGrainName(g.GrainType))
+                : filtered.OrderBy(g => GetDisplayGrainName(g.GrainType)),
             "Activations" => _sortDescending
                 ? filtered.OrderByDescending(g => g.TotalActivations)
                 : filtered.OrderBy(g => g.TotalActivations),
@@ -1036,12 +1089,10 @@
 
     /// <summary>
     /// Gets filtered average latency based on selected silos.
+    /// Always calculates from GrainStats for accuracy (OTel metrics may not capture all latency data).
     /// </summary>
     private double GetFilteredAvgLatency()
     {
-        if (_allSilosSelected)
-            return _data.OTelMetrics.AverageRequestLatencyMs;
-
         var filtered = GetFilteredGrainStats();
         var totalRequests = filtered.Sum(g => g.TotalRequests);
         if (totalRequests == 0) return 0;
@@ -1101,6 +1152,49 @@
         return span.ToString();
     }
 
+    /// <summary>
+    /// Checks if two grain type names refer to the same grain, handling interface vs implementation naming.
+    /// Matches "IFooGrain" with "FooGrain" and vice versa.
+    /// </summary>
+    private static bool GrainTypesMatch(string type1, string type2)
+    {
+        if (string.IsNullOrEmpty(type1) || string.IsNullOrEmpty(type2))
+            return false;
+
+        var short1 = GetShortTypeName(type1);
+        var short2 = GetShortTypeName(type2);
+
+        // Exact match
+        if (short1.Equals(short2, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        // Handle interface vs implementation naming (IFooGrain vs FooGrain)
+        var normalized1 = NormalizeGrainName(short1);
+        var normalized2 = NormalizeGrainName(short2);
+
+        return normalized1.Equals(normalized2, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Normalizes a grain type name by removing the 'I' prefix from interfaces.
+    /// "IFooGrain" -> "FooGrain", "FooGrain" -> "FooGrain"
+    /// </summary>
+    private static string NormalizeGrainName(string shortName)
+    {
+        if (shortName.Length > 1 && shortName[0] == 'I' && char.IsUpper(shortName[1]))
+            return shortName[1..];
+        return shortName;
+    }
+
+    /// <summary>
+    /// Gets a display-friendly grain type name (strips 'I' prefix from interfaces).
+    /// </summary>
+    private static string GetDisplayGrainName(string fullName, int maxLength = 35)
+    {
+        var shortName = GetShortTypeName(fullName, maxLength);
+        return NormalizeGrainName(shortName);
+    }
+
     private static string GetSiloDisplayName(string address)
     {
         if (string.IsNullOrEmpty(address)) return "-";
@@ -1124,6 +1218,61 @@
 
     private static string FormatActivations(int activations) =>
         activations > 0 ? activations.ToString("N0") : "-";
+
+    /// <summary>
+    /// Detects if a grain type name represents an Orleans Grain Observer.
+    /// Observers are client-side objects that receive callbacks from grains.
+    /// They don't have activations because they're not grains.
+    /// </summary>
+    private static bool IsGrainObserver(string grainType)
+    {
+        // Check for common observer naming patterns
+        // e.g., "ManagedCode.Orleans.SignalR.Core.SignalR.Observers.SignalRObserver"
+        return grainType.EndsWith("Observer", StringComparison.Ordinal) ||
+               grainType.Contains(".Observers.", StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Categorizes a grain type for display as a badge/tag.
+    /// Returns (Label, CssClass) tuple for the badge, or null if no special category.
+    /// </summary>
+    private static (string Label, string CssClass)? GetGrainTypeCategory(string grainType)
+    {
+        if (string.IsNullOrEmpty(grainType))
+            return null;
+
+        // Orleans internal system grains (runtime infrastructure)
+        // Match "Orleans.Runtime.*" and "Orleans.Streams.*" but NOT user grains in
+        // namespaces like "Orleans.Insights.Sample" or "MyApp.Orleans.Grains"
+        if (grainType.StartsWith("Orleans.Runtime.", StringComparison.Ordinal) ||
+            grainType.StartsWith("Orleans.Streams.", StringComparison.Ordinal) ||
+            grainType.StartsWith("Orleans.Core.", StringComparison.Ordinal) ||
+            grainType.StartsWith("Orleans.GrainDirectory.", StringComparison.Ordinal) ||
+            grainType.StartsWith("Orleans.Reminders.", StringComparison.Ordinal) ||
+            grainType.StartsWith("Orleans.Transactions.", StringComparison.Ordinal))
+            return ("System", "grain-tag-system");
+
+        // Dashboard/Insights grains (our own infrastructure)
+        if (grainType.Contains(".Insights.", StringComparison.Ordinal) &&
+            grainType.Contains("Grain", StringComparison.Ordinal))
+            return ("Dashboard", "grain-tag-dashboard");
+
+        // Observer (client-side callback objects)
+        if (IsGrainObserver(grainType))
+            return ("Observer", "grain-tag-observer");
+
+        // Storage grains
+        if (grainType.Contains("Storage", StringComparison.Ordinal) ||
+            grainType.Contains("Reminder", StringComparison.Ordinal))
+            return ("Storage", "grain-tag-storage");
+
+        // Stream grains
+        if (grainType.Contains("Stream", StringComparison.Ordinal) ||
+            grainType.Contains("PubSub", StringComparison.Ordinal))
+            return ("Stream", "grain-tag-stream");
+
+        return null;
+    }
 
     public async ValueTask DisposeAsync()
     {

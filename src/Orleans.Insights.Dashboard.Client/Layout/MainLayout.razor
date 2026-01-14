@@ -21,16 +21,16 @@
             </svg>
         </button>
         <div class="mobile-logo">
-            <!-- Orleans Hexagon Logo (Mobile) -->
-            <svg class="mobile-logo-icon" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-                <defs>
-                    <linearGradient id="mobileHexGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-                        <stop offset="0%" style="stop-color:#b877c8"/>
-                        <stop offset="100%" style="stop-color:#7b4397"/>
-                    </linearGradient>
-                </defs>
-                <polygon points="50,5 90,27.5 90,72.5 50,95 10,72.5 10,27.5" fill="url(#mobileHexGradient)"/>
-                <polygon points="50,25 70,37.5 70,62.5 50,75 30,62.5 30,37.5" fill="#000"/>
+            <!-- Orleans Official Logo (Mobile) - Narrow hexagonal gem -->
+            <svg class="mobile-logo-icon" viewBox="0 0 60 100" xmlns="http://www.w3.org/2000/svg">
+                <!-- Outer hexagon - narrower profile -->
+                <polygon points="30,2 55,22 55,78 30,98 5,78 5,22" fill="#68217a"/>
+                <!-- Left face - lighter for 3D effect -->
+                <polygon points="5,22 30,2 30,50 5,78" fill="#783988"/>
+                <!-- Right face - darker for depth -->
+                <polygon points="30,50 55,22 55,78 30,98" fill="#68217a" opacity="0.85"/>
+                <!-- Center gem cutout -->
+                <polygon points="30,26 44,38 44,62 30,74 16,62 16,38" fill="#0d0d0d"/>
             </svg>
             <span class="logo-text">Orleans.Insights</span>
         </div>
@@ -45,27 +45,18 @@
     <aside class="sidebar">
         <div class="sidebar-header">
             <div class="logo">
-                <!-- Orleans Hexagon Logo -->
-                <svg class="logo-icon" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-                    <defs>
-                        <linearGradient id="sidebarHexGradientOuter" x1="0%" y1="0%" x2="100%" y2="100%">
-                            <stop offset="0%" style="stop-color:#9b59b6"/>
-                            <stop offset="50%" style="stop-color:#7b4397"/>
-                            <stop offset="100%" style="stop-color:#5a2d6e"/>
-                        </linearGradient>
-                        <linearGradient id="sidebarHexGradientLeft" x1="0%" y1="0%" x2="100%" y2="100%">
-                            <stop offset="0%" style="stop-color:#b877c8"/>
-                            <stop offset="100%" style="stop-color:#9b59b6"/>
-                        </linearGradient>
-                        <linearGradient id="sidebarHexGradientRight" x1="100%" y1="0%" x2="0%" y2="100%">
-                            <stop offset="0%" style="stop-color:#7b4397"/>
-                            <stop offset="100%" style="stop-color:#5a2d6e"/>
-                        </linearGradient>
-                    </defs>
-                    <polygon points="50,5 90,27.5 90,72.5 50,95 10,72.5 10,27.5" fill="url(#sidebarHexGradientOuter)"/>
-                    <polygon points="10,27.5 50,5 50,50 10,72.5" fill="url(#sidebarHexGradientLeft)" opacity="0.9"/>
-                    <polygon points="90,27.5 50,5 50,50 90,72.5" fill="url(#sidebarHexGradientRight)" opacity="0.85"/>
-                    <polygon points="50,25 70,37.5 70,62.5 50,75 30,62.5 30,37.5" fill="#0d0d0d"/>
+                <!-- Orleans Official Logo - Narrow hexagonal gem like the official branding -->
+                <svg class="logo-icon" viewBox="0 0 60 100" xmlns="http://www.w3.org/2000/svg">
+                    <!-- Outer hexagon - narrower profile matching official Orleans logo -->
+                    <polygon points="30,2 55,22 55,78 30,98 5,78 5,22" fill="#68217a"/>
+                    <!-- Left face - lighter purple for 3D effect -->
+                    <polygon points="5,22 30,2 30,50 5,78" fill="#783988"/>
+                    <!-- Right face - darker for depth -->
+                    <polygon points="30,50 55,22 55,78 30,98" fill="#68217a" opacity="0.85"/>
+                    <!-- Top face highlight -->
+                    <polygon points="30,2 55,22 30,50 5,22" fill="#8a4a9a" opacity="0.4"/>
+                    <!-- Center gem cutout - creates the crystalline hollow -->
+                    <polygon points="30,26 44,38 44,62 30,74 16,62 16,38" fill="#0d0d0d"/>
                 </svg>
                 <span class="logo-text">Orleans.Insights</span>
             </div>
@@ -121,15 +112,11 @@
 
         @* Collapsed state - show only logo icon at bottom *@
         <div class="collapsed-logo">
-            <svg class="collapsed-logo-icon" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-                <defs>
-                    <linearGradient id="collapsedHexGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-                        <stop offset="0%" style="stop-color:#b877c8"/>
-                        <stop offset="100%" style="stop-color:#7b4397"/>
-                    </linearGradient>
-                </defs>
-                <polygon points="50,5 90,27.5 90,72.5 50,95 10,72.5 10,27.5" fill="url(#collapsedHexGradient)"/>
-                <polygon points="50,25 70,37.5 70,62.5 50,75 30,62.5 30,37.5" fill="#0d0d0d"/>
+            <svg class="collapsed-logo-icon" viewBox="0 0 60 100" xmlns="http://www.w3.org/2000/svg">
+                <!-- Orleans Official Logo (Collapsed) - Narrow gem -->
+                <polygon points="30,2 55,22 55,78 30,98 5,78 5,22" fill="#68217a"/>
+                <polygon points="5,22 30,2 30,50 5,78" fill="#783988"/>
+                <polygon points="30,26 44,38 44,62 30,74 16,62 16,38" fill="#0d0d0d"/>
             </svg>
         </div>
     </aside>
@@ -139,7 +126,7 @@
 </div>
 
 <style>
-    /* Logo styles */
+    /* Logo styles - narrow hexagon aspect ratio (60:100 = 0.6:1) */
     .logo {
         display: flex;
         align-items: center;
@@ -147,7 +134,7 @@
     }
 
     .logo-icon {
-        width: 32px;
+        width: 19px;  /* 32px * 0.6 ratio for narrow hexagon */
         height: 32px;
         flex-shrink: 0;
     }
@@ -159,7 +146,7 @@
     }
 
     .mobile-logo-icon {
-        width: 28px;
+        width: 17px;  /* 28px * 0.6 ratio for narrow hexagon */
         height: 28px;
     }
 
@@ -181,7 +168,7 @@
     }
 
     .collapsed-logo-icon {
-        width: 28px;
+        width: 17px;  /* 28px * 0.6 ratio for narrow hexagon */
         height: 28px;
         opacity: 0.8;
     }

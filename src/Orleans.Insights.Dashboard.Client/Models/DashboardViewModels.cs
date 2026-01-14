@@ -1,45 +1,20 @@
 using System;
 using System.Collections.Generic;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 
 namespace Orleans.Insights.Dashboard.Client.Models;
 
 /// <summary>
-/// Source-generated JSON serializer context for dashboard view models.
-/// Eliminates reflection overhead for better WASM performance.
-/// </summary>
-[JsonSourceGenerationOptions(
-    PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
-    PropertyNameCaseInsensitive = true,
-    DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
-[JsonSerializable(typeof(OverviewPageViewModel))]
-[JsonSerializable(typeof(OrleansPageViewModel))]
-[JsonSerializable(typeof(InsightsPageViewModel))]
-[JsonSerializable(typeof(MethodProfileTrendViewModel))]
-[JsonSerializable(typeof(List<MethodProfileTrendViewModel>))]
-[JsonSerializable(typeof(Dictionary<string, object>))]
-public partial class DashboardJsonContext : JsonSerializerContext;
-
-/// <summary>
 /// JSON serializer options for deserializing page data.
-/// Uses source generation for optimal performance in WASM.
 /// </summary>
 public static class JsonOptions
 {
-    /// <summary>
-    /// Default options using source-generated serializer context.
-    /// </summary>
     public static readonly JsonSerializerOptions Default = new()
     {
         PropertyNameCaseInsensitive = true,
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        TypeInfoResolver = DashboardJsonContext.Default
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
     };
 
-    /// <summary>
-    /// Deserialize JSON element to specified type using source-generated context.
-    /// </summary>
     public static T? Deserialize<T>(JsonElement json) where T : class
     {
         return json.Deserialize<T>(Default);
@@ -156,13 +131,13 @@ public record MethodProfileSummaryViewModel
 {
     public string GrainType { get; init; } = "";
     public string MethodName { get; init; } = "";
-    public double AverageLatencyMs { get; init; }
+    /// <summary>Average latency in milliseconds. Maps to server's AvgLatencyMs.</summary>
     public double AvgLatencyMs { get; init; }
     public long TotalCalls { get; init; }
-    public long ExceptionCount { get; init; }
     public long TotalExceptions { get; init; }
     public double ExceptionRate { get; init; }
     public double RequestsPerSecond { get; init; }
+    public double CallsPerSecond { get; init; }
 }
 
 #endregion
@@ -211,10 +186,14 @@ public record ClusterMetricsTrendViewModel
 public record GrainTypeInsightViewModel
 {
     public string GrainType { get; init; } = "";
-    public double AverageLatencyMs { get; init; }
+    /// <summary>Average latency in milliseconds. Maps to server's AvgLatencyMs.</summary>
+    public double AvgLatencyMs { get; init; }
     public double RequestsPerSecond { get; init; }
     public long TotalRequests { get; init; }
     public double ErrorRate { get; init; }
+
+    // Convenience property for backward compatibility
+    public double AverageLatencyMs => AvgLatencyMs;
 }
 
 public record LatencyAnomalyViewModel
@@ -239,18 +218,15 @@ public record ErrorRateAnomalyViewModel
 
 public record SiloComparisonViewModel
 {
-    public string SiloAddress { get; init; } = "";
+    /// <summary>Silo identifier. Maps to server's SiloId.</summary>
+    public string SiloId { get; init; } = "";
     public string HostName { get; init; } = "";
     public double AvgLatencyMs { get; init; }
-    public double AverageLatencyMs { get; init; }
     public double RequestsPerSecond { get; init; }
-    public int ActivationCount { get; init; }
-    public double CpuPercent { get; init; }
     public double AvgCpuPercent { get; init; }
     public long AvgMemoryMb { get; init; }
     public long TotalRequests { get; init; }
     public double PerformanceScore { get; init; }
-    public string PerformanceStatus { get; init; } = "";
 }
 
 public record InsightDatabaseSummaryViewModel

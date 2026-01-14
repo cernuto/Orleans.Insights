@@ -14,7 +14,17 @@
       "Bash(Get-Process -Name \"dotnet\")",
       "Bash(Where-Object {$_MainWindowTitle -like \"*Orleans*\"})",
       "Bash(Stop-Process -Force -ErrorAction SilentlyContinue)",
-      "Bash(powershell -Command \"Get-Process | Where-Object { $_.ProcessName -like ''*Orleans*'' } | Stop-Process -Force\")"
+      "Bash(powershell -Command \"Get-Process | Where-Object { $_.ProcessName -like ''*Orleans*'' } | Stop-Process -Force\")",
+      "Bash(find:*)",
+      "Bash(git log:*)",
+      "Bash(timeout 30 dotnet run:*)",
+      "Bash(timeout 20 dotnet run:*)",
+      "Bash(dotnet clean:*)",
+      "Bash(timeout 25 dotnet run:*)",
+      "Bash(dotnet new:*)",
+      "Bash(dotnet run:*)",
+      "Bash(Select-Object -First 5)",
+      "Bash(findstr:*)"
     ]
   }
 }
