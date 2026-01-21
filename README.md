@@ -194,8 +194,8 @@ public class InsightsOptions
 ## Requirements
 
 - .NET 10.0+
-- Microsoft Orleans 9.0+
-- DuckDB.NET 1.2+
+- Microsoft Orleans 10.0+
+- DuckDB.NET 1.4+
 
 ## License
 
