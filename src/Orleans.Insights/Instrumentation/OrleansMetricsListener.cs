@@ -4,6 +4,7 @@ using Microsoft.Extensions.Options;
 using Orleans.Insights.Models;
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Diagnostics.Metrics;
 using System.Linq;
@@ -22,6 +23,16 @@ public interface IOrleansMetricsListener
     /// Gets summarized Orleans cluster metrics for dashboard display.
     /// </summary>
     OrleansClusterMetricsSnapshot GetClusterMetrics();
+
+    /// <summary>
+    /// Gets per-grain-type metrics collected from Orleans instrumentation.
+    /// </summary>
+    IReadOnlyDictionary<string, GrainTypeMetrics> GetGrainTypeMetrics();
+
+    /// <summary>
+    /// Gets per-method metrics for all grain methods.
+    /// </summary>
+    IReadOnlyDictionary<string, GrainMethodMetrics> GetGrainMethodMetrics();
 }
 
 /// <summary>
@@ -33,6 +44,8 @@ public interface IOrleansMetricsListener
 /// - Exponential smoothing prevents sudden jumps in metrics display
 /// - Process-level CPU/memory tracking (Orleans doesn't expose CPU metrics)
 /// - Thread-safe with ConcurrentDictionary and Lock for complex state updates
+/// - Span-based string building for efficient metric key construction
+/// - LRU eviction to prevent unbounded memory growth
 ///
 /// IMPORTANT: This service implements IHostedService to ensure it starts BEFORE Orleans.
 /// MeterListener only captures instruments published AFTER it starts, so timing is critical.
@@ -46,8 +59,11 @@ public sealed class OrleansMetricsListener : IOrleansMetricsListener, IHostedSer
     private bool _disposed;
     private int _instrumentCount;
 
-    // Thread-safe metric storage
+    // Thread-safe metric storage with LRU eviction to prevent unbounded growth
     private readonly ConcurrentDictionary<string, double> _metrics = new();
+    private readonly ConcurrentDictionary<string, GrainTypeMetrics> _grainTypeMetrics = new();
+    private readonly ConcurrentDictionary<string, GrainMethodMetrics> _grainMethodMetrics = new();
+    private readonly Stopwatch _evictionCheckStopwatch = Stopwatch.StartNew();
 
     // Cluster-wide latency tracking using delta calculation from cumulative counters
     // Orleans exposes latency-sum (cumulative total) and latency-count (request count)
@@ -69,6 +85,15 @@ public sealed class OrleansMetricsListener : IOrleansMetricsListener, IHostedSer
     // Exponential smoothing weights for display stability
     private const double LatencyOldWeight = 0.7;
     private const double LatencyNewWeight = 0.3;
+    private const double MethodLatencyOldWeight = 0.9;
+    private const double MethodLatencyNewWeight = 0.1;
+
+    // LRU eviction constants
+    private const int MaxMetricsEntries = 10000;
+    private const double LruEvictionMultiplier = 1.2;
+    private const int LruEvictionCount = 1000;
+    private const int DefaultMetricsSampleLimit = 100;
+    private const int DefaultMethodProfileSampleLimit = 120;
 
     // Orleans meter and metric names
     private const string OrleansMeterName = "Microsoft.Orleans";
@@ -131,6 +156,9 @@ public sealed class OrleansMetricsListener : IOrleansMetricsListener, IHostedSer
 
             // Update process-level CPU/memory metrics
             UpdateProcessMetrics();
+
+            // Perform LRU eviction periodically to prevent unbounded growth
+            EvictStaleEntriesIfNeeded();
         }
         catch (Exception ex)
         {
@@ -182,6 +210,58 @@ public sealed class OrleansMetricsListener : IOrleansMetricsListener, IHostedSer
         }
     }
 
+    /// <summary>
+    /// Evicts stale entries from metric dictionaries using LRU policy.
+    /// Prevents unbounded memory growth in long-running silos.
+    /// </summary>
+    private void EvictStaleEntriesIfNeeded()
+    {
+        // Only check every minute to avoid overhead
+        if (_evictionCheckStopwatch.Elapsed.TotalMinutes < 1)
+            return;
+
+        _evictionCheckStopwatch.Restart();
+
+        // Check if any dictionary exceeds the threshold
+        var grainTypeCount = _grainTypeMetrics.Count;
+        var methodCount = _grainMethodMetrics.Count;
+
+        var needsEviction =
+            grainTypeCount > MaxMetricsEntries * LruEvictionMultiplier ||
+            methodCount > MaxMetricsEntries * LruEvictionMultiplier;
+
+        if (!needsEviction)
+            return;
+
+        // Evict oldest entries from each dictionary
+        if (grainTypeCount > MaxMetricsEntries)
+        {
+            var toRemove = _grainTypeMetrics
+                .OrderBy(kv => kv.Value.LastUpdated)
+                .Take(LruEvictionCount)
+                .Select(kv => kv.Key)
+                .ToList();
+
+            foreach (var key in toRemove)
+                _grainTypeMetrics.TryRemove(key, out _);
+        }
+
+        if (methodCount > MaxMetricsEntries)
+        {
+            var toRemove = _grainMethodMetrics
+                .OrderBy(kv => kv.Value.LastUpdated)
+                .Take(LruEvictionCount)
+                .Select(kv => kv.Key)
+                .ToList();
+
+            foreach (var key in toRemove)
+                _grainMethodMetrics.TryRemove(key, out _);
+        }
+
+        _logger.LogInformation("LRU eviction completed: grainTypes={GrainTypeCount}, methods={MethodCount}",
+            _grainTypeMetrics.Count, _grainMethodMetrics.Count);
+    }
+
     private void OnInstrumentPublished(Instrument instrument, MeterListener listener)
     {
         // Subscribe to Orleans built-in metrics
@@ -201,8 +281,31 @@ public sealed class OrleansMetricsListener : IOrleansMetricsListener, IHostedSer
         var value = Convert.ToDouble(measurement);
         var name = instrument.Name;
 
-        // Store the raw metric value
-        _metrics[name] = value;
+        string? grainType = null;
+        string? grainMethod = null;
+        bool? isSuccess = null;
+
+        // Extract tags - Orleans uses various naming conventions
+        foreach (var tag in tags)
+        {
+            if (tag.Value == null) continue;
+
+            var key = tag.Key;
+            var tagValue = tag.Value.ToString() ?? string.Empty;
+
+            // Check for grain type tag (Orleans patterns)
+            if (key is "grain.type" or "orleans.grain.type" or "rpc.service" or "orleans.target.grain.type" or "type")
+                grainType = tagValue;
+            // Check for method tag
+            else if (key is "grain.method" or "orleans.grain.method" or "rpc.method" or "orleans.target.grain.method")
+                grainMethod = tagValue;
+            else if (key is "success" or "orleans.success" or "rpc.grpc.status_code")
+                isSuccess = tag.Value is bool b ? b : (tagValue == "0" || tagValue.Equals("true", StringComparison.OrdinalIgnoreCase));
+        }
+
+        // Store the raw metric value with key built from name and tags
+        var metricKey = tags.Length == 0 ? name : BuildMetricKey(name, tags);
+        _metrics[metricKey] = value;
 
         // Track cluster-wide latency using cumulative sum/count from Orleans histogram metrics
         if (name.Equals(AppRequestsLatencySum, StringComparison.OrdinalIgnoreCase))
@@ -213,6 +316,110 @@ public sealed class OrleansMetricsListener : IOrleansMetricsListener, IHostedSer
         {
             UpdateLatencyCount((long)value);
         }
+
+        // Track per-grain-type metrics if grain type is available
+        if (!string.IsNullOrEmpty(grainType))
+        {
+            // Normalize grain type (strip assembly suffix if present)
+            var normalizedGrainType = grainType;
+            var commaIdx = grainType.LastIndexOf(',');
+            if (commaIdx >= 0)
+                normalizedGrainType = grainType[..commaIdx];
+
+            UpdateGrainTypeMetrics(name, normalizedGrainType, value, isSuccess);
+
+            if (!string.IsNullOrEmpty(grainMethod))
+            {
+                UpdateGrainMethodMetrics(normalizedGrainType, grainMethod, name, value, isSuccess);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Builds a metric key from instrument name and tags using span-based approach for efficiency.
+    /// </summary>
+    private static string BuildMetricKey(string name, ReadOnlySpan<KeyValuePair<string, object?>> tags)
+    {
+        // Use Span-based building for efficiency
+        Span<char> buffer = stackalloc char[256];
+        var pos = 0;
+
+        name.AsSpan().CopyTo(buffer);
+        pos += name.Length;
+        buffer[pos++] = '[';
+
+        var first = true;
+        foreach (var tag in tags)
+        {
+            if (tag.Value == null) continue;
+
+            if (!first) buffer[pos++] = ',';
+            first = false;
+
+            var k = tag.Key;
+            var v = tag.Value.ToString() ?? "";
+
+            k.AsSpan().CopyTo(buffer[pos..]);
+            pos += k.Length;
+            buffer[pos++] = '=';
+            v.AsSpan().CopyTo(buffer[pos..]);
+            pos += v.Length;
+        }
+
+        buffer[pos++] = ']';
+        return new string(buffer[..pos]);
+    }
+
+    private void UpdateGrainTypeMetrics(string instrumentName, string grainType, double value, bool? isSuccess)
+    {
+        var metrics = _grainTypeMetrics.GetOrAdd(grainType,
+            _ => new GrainTypeMetrics(grainType, DefaultMetricsSampleLimit));
+
+        // Match Orleans patterns (latency, requests)
+        if (instrumentName.Contains("latency", StringComparison.OrdinalIgnoreCase) ||
+            instrumentName.Contains("duration", StringComparison.OrdinalIgnoreCase))
+        {
+            metrics.AddLatencySample(value);
+        }
+        else if (instrumentName.Contains("requests", StringComparison.OrdinalIgnoreCase) ||
+                 instrumentName.Contains("calls", StringComparison.OrdinalIgnoreCase))
+        {
+            metrics.IncrementRequests(isSuccess ?? true);
+        }
+        else if (instrumentName.Contains("errors", StringComparison.OrdinalIgnoreCase))
+        {
+            // Track errors as failed requests
+            metrics.IncrementRequests(false);
+        }
+
+        metrics.LastUpdated = DateTime.UtcNow;
+    }
+
+    private void UpdateGrainMethodMetrics(string grainType, string method, string instrumentName,
+        double value, bool? isSuccess)
+    {
+        var key = $"{grainType}::{method}";
+        var metrics = _grainMethodMetrics.GetOrAdd(key,
+            _ => new GrainMethodMetrics(grainType, method, DefaultMethodProfileSampleLimit));
+
+        // Match Orleans patterns (latency, requests)
+        if (instrumentName.Contains("latency", StringComparison.OrdinalIgnoreCase) ||
+            instrumentName.Contains("duration", StringComparison.OrdinalIgnoreCase))
+        {
+            metrics.AddLatencySample(value);
+        }
+        else if (instrumentName.Contains("requests", StringComparison.OrdinalIgnoreCase) ||
+                 instrumentName.Contains("calls", StringComparison.OrdinalIgnoreCase))
+        {
+            metrics.IncrementRequests(isSuccess ?? true);
+        }
+        else if (instrumentName.Contains("errors", StringComparison.OrdinalIgnoreCase))
+        {
+            // Track errors as failed requests
+            metrics.IncrementRequests(false);
+        }
+
+        metrics.LastUpdated = DateTime.UtcNow;
     }
 
     /// <summary>
@@ -351,6 +558,16 @@ public sealed class OrleansMetricsListener : IOrleansMetricsListener, IHostedSer
         };
     }
 
+    /// <summary>
+    /// Gets per-grain-type metrics collected from Orleans instrumentation.
+    /// </summary>
+    public IReadOnlyDictionary<string, GrainTypeMetrics> GetGrainTypeMetrics() => _grainTypeMetrics;
+
+    /// <summary>
+    /// Gets per-method metrics for all grain methods.
+    /// </summary>
+    public IReadOnlyDictionary<string, GrainMethodMetrics> GetGrainMethodMetrics() => _grainMethodMetrics;
+
     private double GetMetricValue(string prefix)
     {
         // Sum all metrics that start with this prefix (may have tags appended)
@@ -401,3 +618,222 @@ public sealed record OrleansClusterMetricsSnapshot
     public long GrainCount { get; init; }
     public long SystemTargets { get; init; }
 }
+
+/// <summary>
+/// Aggregated metrics for a specific grain type.
+/// Thread-safe with bounded queue to prevent memory growth.
+/// </summary>
+public sealed class GrainTypeMetrics
+{
+    private readonly Lock _lock = new();
+    private readonly Queue<double> _recentLatencies;
+    private readonly int _maxSamples;
+    private double _latencySum; // Running sum for O(1) average calculation
+
+    public string GrainType { get; }
+    public long TotalRequests { get; private set; }
+    public long FailedRequests { get; private set; }
+    public double AverageLatencyMs { get; private set; }
+    public double MinLatencyMs { get; private set; } = double.MaxValue;
+    public double MaxLatencyMs { get; private set; }
+    public DateTime FirstSeen { get; }
+    public DateTime LastUpdated { get; set; }
+
+    // For throughput calculation (requests per second) - uses Stopwatch for monotonic timing
+    private long _requestsAtWindowStart;
+    private readonly Stopwatch _windowStopwatch = Stopwatch.StartNew();
+    public double RequestsPerSecond { get; private set; }
+
+    public GrainTypeMetrics(string grainType, int maxSamples = 100)
+    {
+        GrainType = grainType;
+        _maxSamples = maxSamples;
+        _recentLatencies = new Queue<double>(maxSamples);
+        FirstSeen = DateTime.UtcNow;
+        LastUpdated = DateTime.UtcNow;
+    }
+
+    public void AddLatencySample(double latencyMs)
+    {
+        using (_lock.EnterScope())
+        {
+            // Maintain bounded rolling window of recent latencies
+            if (_recentLatencies.Count >= _maxSamples)
+            {
+                // Remove oldest sample from running average
+                var removed = _recentLatencies.Dequeue();
+                _latencySum -= removed;
+            }
+
+            _recentLatencies.Enqueue(latencyMs);
+            _latencySum += latencyMs;
+
+            // Update statistics using running sum (O(1) instead of O(n))
+            AverageLatencyMs = _recentLatencies.Count > 0 ? _latencySum / _recentLatencies.Count : 0;
+            MinLatencyMs = Math.Min(MinLatencyMs, latencyMs);
+            MaxLatencyMs = Math.Max(MaxLatencyMs, latencyMs);
+        }
+    }
+
+    public void IncrementRequests(bool success)
+    {
+        using (_lock.EnterScope())
+        {
+            TotalRequests++;
+            if (!success)
+                FailedRequests++;
+
+            // Calculate throughput over sliding window using monotonic Stopwatch
+            var windowDuration = _windowStopwatch.Elapsed.TotalSeconds;
+
+            if (windowDuration >= 1.0)
+            {
+                RequestsPerSecond = (TotalRequests - _requestsAtWindowStart) / windowDuration;
+                _requestsAtWindowStart = TotalRequests;
+                _windowStopwatch.Restart();
+            }
+        }
+    }
+
+    public double ExceptionRate => TotalRequests > 0
+        ? (FailedRequests / (double)TotalRequests) * 100.0
+        : 0.0;
+}
+
+/// <summary>
+/// Aggregated metrics for a specific grain method.
+/// Thread-safe with bounded sample queue to prevent memory growth.
+/// </summary>
+public sealed class GrainMethodMetrics
+{
+    private readonly Lock _lock = new();
+    private readonly Queue<MethodMetricSample> _samples;
+    private readonly int _maxSamples;
+
+    public string GrainType { get; }
+    public string MethodName { get; }
+    public long TotalRequests { get; private set; }
+    public long FailedRequests { get; private set; }
+    public double AverageLatencyMs { get; private set; }
+    public DateTime LastUpdated { get; set; }
+
+    // For throughput tracking - uses Stopwatch for monotonic timing
+    private readonly Stopwatch _sampleStopwatch = Stopwatch.StartNew();
+    private long _requestsAtLastSample;
+    private long _failedRequestsAtLastSample;
+    private double _lastLatencyMs;
+
+    public GrainMethodMetrics(string grainType, string methodName, int maxSamples = 120)
+    {
+        GrainType = grainType;
+        MethodName = methodName;
+        _maxSamples = maxSamples;
+        _samples = new Queue<MethodMetricSample>(maxSamples);
+    }
+
+    public void AddLatencySample(double latencyMs)
+    {
+        using (_lock.EnterScope())
+        {
+            _lastLatencyMs = latencyMs;
+
+            // Update running average using exponential moving average
+            AverageLatencyMs = AverageLatencyMs == 0
+                ? latencyMs
+                : (AverageLatencyMs * 0.9) + (latencyMs * 0.1);
+
+            // Try to record a sample if enough time has passed
+            TryRecordSample();
+        }
+    }
+
+    public void IncrementRequests(bool success)
+    {
+        using (_lock.EnterScope())
+        {
+            TotalRequests++;
+            if (!success)
+                FailedRequests++;
+
+            // Try to record a sample if enough time has passed
+            TryRecordSample();
+        }
+    }
+
+    /// <summary>
+    /// Records a time-series sample if at least 1 second has elapsed.
+    /// </summary>
+    private void TryRecordSample()
+    {
+        var elapsed = _sampleStopwatch.Elapsed.TotalSeconds;
+
+        if (elapsed >= 1.0)
+        {
+            var requestsDelta = TotalRequests - _requestsAtLastSample;
+            var throughput = requestsDelta / elapsed;
+            var failedDelta = Math.Max(0, FailedRequests - _failedRequestsAtLastSample);
+
+            // Maintain bounded queue
+            if (_samples.Count >= _maxSamples)
+                _samples.Dequeue();
+
+            _samples.Enqueue(new MethodMetricSample(DateTime.UtcNow, throughput, _lastLatencyMs > 0 ? _lastLatencyMs : AverageLatencyMs, failedDelta));
+
+            _sampleStopwatch.Restart();
+            _requestsAtLastSample = TotalRequests;
+            _failedRequestsAtLastSample = FailedRequests;
+        }
+    }
+
+    /// <summary>
+    /// Gets the recent samples for charting.
+    /// </summary>
+    public List<MethodMetricSample> GetRecentSamples(int maxCount = 60)
+    {
+        using (_lock.EnterScope())
+        {
+            // Pre-allocate list with exact capacity to avoid resizing
+            var count = Math.Min(maxCount, _samples.Count);
+            var result = new List<MethodMetricSample>(count);
+
+            // Use Skip instead of TakeLast to avoid LINQ allocation
+            var skipCount = _samples.Count - count;
+            var i = 0;
+            foreach (var sample in _samples)
+            {
+                if (i >= skipCount)
+                    result.Add(sample);
+                i++;
+            }
+            return result;
+        }
+    }
+
+    /// <summary>
+    /// Gets the current throughput and latency snapshot for real-time display.
+    /// </summary>
+    public (double RequestsPerSecond, double LatencyMs, double FailedCount) GetCurrentSnapshot()
+    {
+        using (_lock.EnterScope())
+        {
+            var elapsed = _sampleStopwatch.Elapsed.TotalSeconds;
+
+            if (elapsed < 0.1) elapsed = 1.0; // Avoid division by near-zero
+
+            var requestsDelta = TotalRequests - _requestsAtLastSample;
+            var throughput = requestsDelta / elapsed;
+            var failedDelta = Math.Max(0, FailedRequests - _failedRequestsAtLastSample);
+
+            return (throughput, _lastLatencyMs > 0 ? _lastLatencyMs : AverageLatencyMs, failedDelta);
+        }
+    }
+}
+
+/// <summary>
+/// A single time-series sample for method profiling charts.
+/// </summary>
+public record MethodMetricSample(
+    DateTime Timestamp,
+    double RequestsPerSecond,
+    double LatencyMs,
+    double FailedCount);

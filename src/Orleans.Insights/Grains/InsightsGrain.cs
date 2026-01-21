@@ -95,8 +95,8 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
         _schemaManager = new InsightsSchemaManager(_logger, _database);
         _schemaManager.InitializeSchema();
 
-        // Create buffer for batch ingestion
-        _buffer = new InsightsMetricsBuffer(_logger, Settings);
+        // Create buffer for batch ingestion (channel-based with lazy consumer)
+        _buffer = new InsightsMetricsBuffer(_logger, Settings, _database);
 
         // Start maintenance timer
         _vacuumStopwatch.Start();
@@ -116,22 +116,25 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
         return base.OnActivateAsync(cancellationToken);
     }
 
-    public override Task OnDeactivateAsync(DeactivationReason reason, CancellationToken cancellationToken)
+    public override async Task OnDeactivateAsync(DeactivationReason reason, CancellationToken cancellationToken)
     {
         _logger.LogInformation("InsightsGrain deactivating: {Reason}", reason);
 
-        // Flush any remaining buffered data
-        try
+        // Dispose buffer to flush any remaining data
+        if (_buffer != null)
         {
-            _buffer?.FlushTo(Database);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to flush buffers during deactivation");
+            try
+            {
+                await _buffer.DisposeAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to dispose buffer during deactivation");
+            }
         }
 
         Dispose();
-        return base.OnDeactivateAsync(reason, cancellationToken);
+        await base.OnDeactivateAsync(reason, cancellationToken);
     }
 
     #region Ingestion Methods
@@ -141,12 +144,8 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
     {
         try
         {
+            // Channel-based buffer handles flushing automatically via background consumer
             Buffer.BufferSiloMetrics(metrics);
-
-            if (Buffer.ShouldFlush())
-            {
-                Buffer.FlushTo(Database);
-            }
 
             if (_logger.IsEnabled(LogLevel.Debug))
             {
@@ -170,20 +169,16 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
         try
         {
             // Log first few entries to verify TotalElapsedMs is being received correctly after serialization
-            if (reportValue.Entries.Count > 0)
+            if (reportValue.Entries.Count > 0 && _logger.IsEnabled(LogLevel.Debug))
             {
                 var firstEntry = reportValue.Entries[0];
-                _logger.LogInformation(
+                _logger.LogDebug(
                     "[IngestMethodProfile] First entry: {GrainType}.{Method} Count={Count} TotalElapsedMs={TotalElapsedMs:F3}",
                     firstEntry.GrainType, firstEntry.Method, firstEntry.Count, firstEntry.TotalElapsedMs);
             }
 
+            // Channel-based buffer handles flushing automatically via background consumer
             Buffer.BufferMethodProfile(reportValue);
-
-            if (Buffer.ShouldFlush())
-            {
-                Buffer.FlushTo(Database);
-            }
 
             if (_logger.IsEnabled(LogLevel.Debug))
             {
@@ -1697,8 +1692,8 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
 
         try
         {
-            // Flush pending buffers
-            _buffer?.FlushTo(Database);
+            // Ensure any pending buffers are being processed
+            _buffer?.EnsureProcessing();
 
             // Apply retention policies
             _schemaManager?.ApplyRetention(Settings.RetentionPeriod);

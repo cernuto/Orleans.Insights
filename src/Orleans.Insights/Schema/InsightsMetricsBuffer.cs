@@ -4,330 +4,415 @@ using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Channels;
+using System.Threading.Tasks;
 
 namespace Orleans.Insights.Schema;
 
 /// <summary>
-/// Manages batch buffering and flushing for Insights metrics.
-/// Implements the single responsibility of buffering metrics before high-throughput
-/// batch writes to DuckDB using the Appender API.
+/// Manages batch buffering and flushing for Insights metrics using a Channel-based
+/// producer-consumer pattern with lazy consumer startup.
 /// </summary>
 /// <remarks>
 /// <para>
-/// Optimized for single-threaded Orleans grain execution - no locking required.
-/// Orleans guarantees that grain methods are never executed concurrently.
+/// The consumer task starts on-demand when items are written and automatically exits
+/// after an idle timeout. This avoids permanent background threads when there's no work.
 /// </para>
 /// <para>
-/// Uses CollectionsMarshal.AsSpan for zero-copy iteration during flush operations.
-/// Buffer lists are pre-sized based on typical batch sizes to minimize reallocations.
+/// Uses a bounded channel with backpressure - when full, oldest items are dropped
+/// to prevent unbounded memory growth under heavy load.
+/// </para>
+/// <para>
+/// Thread safety: Producer methods (Buffer*) are called from the Orleans grain's single-threaded
+/// context. The consumer runs on a thread pool thread and has exclusive read access to the channel.
 /// </para>
 /// </remarks>
-internal sealed class InsightsMetricsBuffer
+internal sealed class InsightsMetricsBuffer : IAsyncDisposable
 {
+    private readonly Channel<MetricRecord> _channel;
     private readonly ILogger _logger;
     private readonly InsightsOptions _settings;
-    private readonly Stopwatch _flushStopwatch = new();
+    private readonly InsightsDatabase _database;
 
-    // No lock needed - Orleans grains are single-threaded
-    private readonly List<ClusterMetricRecord> _clusterBuffer;
-    private readonly List<GrainMetricRecord> _grainBuffer;
-    private readonly List<MethodMetricRecord> _methodBuffer;
-    private readonly List<MethodProfileRecord> _methodProfileBuffer;
-    private readonly List<GrainTypeActivationRecord> _grainTypeActivationBuffer;
+    private int _consumerRunning;
+    private volatile bool _disposed;
 
-    public InsightsMetricsBuffer(ILogger logger, InsightsOptions settings)
+    public InsightsMetricsBuffer(ILogger logger, InsightsOptions settings, InsightsDatabase database)
     {
         _logger = logger;
         _settings = settings;
-        _flushStopwatch.Start();
+        _database = database;
 
-        // Pre-size buffers based on expected batch sizes to reduce allocations
-        var expectedBatchSize = settings.BatchFlushThreshold;
-        _clusterBuffer = new List<ClusterMetricRecord>(Math.Min(expectedBatchSize, 100));
-        _grainBuffer = new List<GrainMetricRecord>(Math.Min(expectedBatchSize, 500));
-        _methodBuffer = new List<MethodMetricRecord>(Math.Min(expectedBatchSize, 1000));
-        // Method profile buffer - expects high volume from all silos every second
-        _methodProfileBuffer = new List<MethodProfileRecord>(Math.Min(expectedBatchSize, 2000));
-        // Grain type activation buffer - one entry per grain type per silo per report
-        _grainTypeActivationBuffer = new List<GrainTypeActivationRecord>(Math.Min(expectedBatchSize, 500));
+        _channel = Channel.CreateBounded<MetricRecord>(new BoundedChannelOptions(settings.ChannelCapacity)
+        {
+            FullMode = BoundedChannelFullMode.DropOldest,
+            SingleReader = true,
+            SingleWriter = false
+        });
     }
 
     /// <summary>
-    /// Gets the total count of buffered records across all metric types.
+    /// Gets the approximate count of pending records in the channel.
     /// </summary>
-    public int TotalCount
-    {
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        get => _clusterBuffer.Count + _grainBuffer.Count + _methodBuffer.Count +
-               _methodProfileBuffer.Count + _grainTypeActivationBuffer.Count;
-    }
+    public int TotalCount => _channel.Reader.Count;
 
     /// <summary>
     /// Buffers metrics from a silo report.
-    /// No locking - Orleans grains are single-threaded.
     /// </summary>
     public void BufferSiloMetrics(SiloMetricsReport metrics)
     {
+        if (_disposed) return;
+
         var timestamp = metrics.Timestamp;
         var siloId = metrics.SiloId;
         var hostName = metrics.HostName;
         var cm = metrics.ClusterMetrics;
 
         // Buffer cluster metrics
-        _clusterBuffer.Add(new ClusterMetricRecord(
+        TryWrite(new ClusterMetricRecord(
             timestamp, siloId, hostName,
             cm.TotalActivations, cm.ConnectedClients,
             cm.MessagesSent, cm.MessagesReceived, cm.MessagesDropped,
             cm.CpuUsagePercent, cm.MemoryUsageMb, cm.AvailableMemoryMb,
             cm.AverageRequestLatencyMs, cm.TotalRequests,
-            // Catalog metrics
             cm.ActivationWorkingSet, cm.ActivationsCreated, cm.ActivationsDestroyed,
             cm.ActivationsFailedToActivate, cm.ActivationCollections, cm.ActivationShutdowns,
             cm.ActivationNonExistent, cm.ConcurrentRegistrationAttempts,
-            // Miscellaneous grain metrics
             cm.GrainCount, cm.SystemTargets));
 
-        // Buffer grain type metrics
+        // Buffer grain type metrics and activations
         foreach (var (grainType, gm) in metrics.GrainTypeMetrics)
         {
-            _grainBuffer.Add(new GrainMetricRecord(
+            TryWrite(new GrainMetricRecord(
                 timestamp, siloId, grainType,
                 gm.TotalRequests, gm.FailedRequests,
                 gm.AverageLatencyMs, gm.MinLatencyMs, gm.MaxLatencyMs,
                 gm.RequestsPerSecond));
+
+            // IMPORTANT: Always write activation records (even 0) to overwrite stale data
+            // This ensures that when a grain moves to another silo, the old silo's stale
+            // activation count is replaced with 0 rather than persisting forever.
+            TryWrite(new GrainTypeActivationRecord(
+                timestamp, siloId, grainType, gm.Activations));
         }
 
         // Buffer method metrics
         foreach (var (_, mm) in metrics.MethodMetrics)
         {
-            _methodBuffer.Add(new MethodMetricRecord(
+            TryWrite(new MethodMetricRecord(
                 timestamp, siloId, mm.GrainType, mm.MethodName,
                 mm.TotalRequests, mm.FailedRequests,
                 mm.AverageLatencyMs, mm.RequestsPerSecond));
-        }
-
-        // Buffer grain type activations from IManagementGrain data
-        // IMPORTANT: Always write activation records (even 0) to overwrite stale data
-        // This ensures that when a grain moves to another silo, the old silo's stale
-        // activation count is replaced with 0 rather than persisting forever.
-        foreach (var (grainType, gm) in metrics.GrainTypeMetrics)
-        {
-            _grainTypeActivationBuffer.Add(new GrainTypeActivationRecord(
-                timestamp, siloId, grainType, gm.Activations));
         }
     }
 
     /// <summary>
     /// Buffers method profile data from GrainMethodProfiler.
     /// Stores raw totals (count + elapsedMs) for accurate average calculation.
-    /// No locking - Orleans grains are single-threaded.
     /// </summary>
     public void BufferMethodProfile(MethodProfileReport report)
     {
+        if (_disposed) return;
+
         var timestamp = report.Timestamp;
         var siloId = report.SiloId;
         var hostName = report.HostName;
 
         foreach (var entry in report.Entries)
         {
-            _methodProfileBuffer.Add(new MethodProfileRecord(
-                timestamp,
-                siloId,
-                hostName,
-                entry.GrainType,
-                entry.Method,
-                entry.Count,
-                entry.TotalElapsedMs,
-                entry.ExceptionCount));
+            TryWrite(new MethodProfileRecord(
+                timestamp, siloId, hostName,
+                entry.GrainType, entry.Method,
+                entry.Count, entry.TotalElapsedMs, entry.ExceptionCount));
         }
     }
 
     /// <summary>
-    /// Checks if a flush is needed based on count or time thresholds.
+    /// Ensures the consumer is running. Used during maintenance to flush pending items.
     /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public bool ShouldFlush() =>
-        TotalCount >= _settings.BatchFlushThreshold ||
-        _flushStopwatch.Elapsed >= _settings.BatchFlushInterval;
-
-    /// <summary>
-    /// Drains all buffers and flushes to the database using batch Appender.
-    /// Returns true if any records were flushed.
-    /// No locking - Orleans grains are single-threaded.
-    /// Uses CollectionsMarshal.AsSpan for zero-copy iteration.
-    /// </summary>
-    public bool FlushTo(InsightsDatabase database)
+    public void EnsureProcessing()
     {
-        if (_clusterBuffer.Count == 0 && _grainBuffer.Count == 0 &&
-            _methodBuffer.Count == 0 && _methodProfileBuffer.Count == 0 &&
-            _grainTypeActivationBuffer.Count == 0)
+        if (!_disposed && _channel.Reader.TryPeek(out _))
         {
-            _flushStopwatch.Restart();
-            return false;
+            EnsureConsumerRunning();
+        }
+    }
+
+    private void TryWrite(MetricRecord record)
+    {
+        if (!_channel.Writer.TryWrite(record))
+        {
+            _logger.LogDebug("Metrics channel full, dropped record");
+            return;
         }
 
-        // Capture counts before clearing (for logging)
-        var clusterCount = _clusterBuffer.Count;
-        var grainCount = _grainBuffer.Count;
-        var methodCount = _methodBuffer.Count;
-        var methodProfileCount = _methodProfileBuffer.Count;
-        var grainTypeActivationCount = _grainTypeActivationBuffer.Count;
-        var totalRecords = clusterCount + grainCount + methodCount + methodProfileCount + grainTypeActivationCount;
+        EnsureConsumerRunning();
+    }
 
+    private void EnsureConsumerRunning()
+    {
+        if (Interlocked.CompareExchange(ref _consumerRunning, 1, 0) == 0)
+        {
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await ConsumeAsync();
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref _consumerRunning, 0);
+
+                    // Check if items arrived while we were exiting
+                    if (_channel.Reader.TryPeek(out _) && !_disposed)
+                    {
+                        EnsureConsumerRunning();
+                    }
+                }
+            });
+        }
+    }
+
+    private async Task ConsumeAsync()
+    {
+        var batch = new List<MetricRecord>(_settings.BatchFlushThreshold);
+        var idleTimeout = _settings.BatchFlushInterval;
+
+        while (!_disposed)
+        {
+            batch.Clear();
+
+            // Drain all available items up to batch size
+            while (batch.Count < _settings.BatchFlushThreshold &&
+                   _channel.Reader.TryRead(out var record))
+            {
+                batch.Add(record);
+            }
+
+            if (batch.Count > 0)
+            {
+                FlushBatch(batch);
+            }
+            else
+            {
+                // Channel empty - wait briefly for more items or exit
+                using var cts = new CancellationTokenSource(idleTimeout);
+                try
+                {
+                    var record = await _channel.Reader.ReadAsync(cts.Token);
+                    batch.Add(record);
+
+                    // Got one - drain any others that arrived
+                    while (batch.Count < _settings.BatchFlushThreshold &&
+                           _channel.Reader.TryRead(out var additional))
+                    {
+                        batch.Add(additional);
+                    }
+
+                    FlushBatch(batch);
+                }
+                catch (OperationCanceledException)
+                {
+                    // Timeout with no items - exit consumer
+                    _logger.LogDebug("Metrics consumer exiting after idle timeout");
+                    return;
+                }
+            }
+        }
+    }
+
+    private void FlushBatch(List<MetricRecord> batch)
+    {
         var sw = Stopwatch.StartNew();
 
         try
         {
-            // Flush directly from buffers using span-based iteration
-            FlushBuffersDirect(database);
+            // Partition records by type in a single pass
+            var partitioned = PartitionRecords(batch);
+            var connection = _database.WriteConnection;
 
-            // Clear buffers after successful flush
-            _clusterBuffer.Clear();
-            _grainBuffer.Clear();
-            _methodBuffer.Clear();
-            _methodProfileBuffer.Clear();
-            _grainTypeActivationBuffer.Clear();
-            _flushStopwatch.Restart();
+            FlushClusterMetrics(connection, partitioned.Cluster);
+            FlushGrainMetrics(connection, partitioned.Grain);
+            FlushGrainTypeActivations(connection, partitioned.GrainTypeActivation);
+            FlushMethodMetrics(connection, partitioned.Method);
+            FlushMethodProfileMetrics(connection, partitioned.MethodProfile);
 
             sw.Stop();
-            _logger.LogDebug(
-                "Flushed {TotalRecords} records in {ElapsedMs}ms (cluster={Cluster}, grain={Grain}, method={Method}, methodProfile={MethodProfile}, grainTypeActivation={GrainTypeActivation})",
-                totalRecords, sw.ElapsedMilliseconds,
-                clusterCount, grainCount, methodCount, methodProfileCount, grainTypeActivationCount);
-
-            return true;
+            _logger.LogDebug("Flushed {Count} metric records in {ElapsedMs}ms", batch.Count, sw.ElapsedMilliseconds);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to flush metric buffers");
-            // Buffers are not cleared on failure - data is preserved for retry
-            return false;
+            _logger.LogError(ex, "Failed to flush {Count} metric records", batch.Count);
         }
     }
 
-    /// <summary>
-    /// Flushes buffers directly using CollectionsMarshal.AsSpan for zero-copy iteration.
-    /// Avoids creating snapshot copies - more efficient for single-threaded execution.
-    /// </summary>
-    private void FlushBuffersDirect(InsightsDatabase database)
+    private static PartitionedRecords PartitionRecords(List<MetricRecord> batch)
     {
-        var connection = database.WriteConnection;
+        var cluster = new List<ClusterMetricRecord>();
+        var grain = new List<GrainMetricRecord>();
+        var grainTypeActivation = new List<GrainTypeActivationRecord>();
+        var method = new List<MethodMetricRecord>();
+        var methodProfile = new List<MethodProfileRecord>();
 
-        // Flush cluster metrics using Appender with span-based iteration
-        if (_clusterBuffer.Count > 0)
+        foreach (var record in batch)
         {
-            using var appender = connection.CreateAppender("cluster_metrics");
-            var span = CollectionsMarshal.AsSpan(_clusterBuffer);
-            foreach (ref readonly var r in span)
+            switch (record)
             {
-                appender.CreateRow()
-                    .AppendValue(r.Timestamp)
-                    .AppendValue(r.SiloId)
-                    .AppendValue(r.HostName)
-                    .AppendValue(r.TotalActivations)
-                    .AppendValue(r.ConnectedClients)
-                    .AppendValue(r.MessagesSent)
-                    .AppendValue(r.MessagesReceived)
-                    .AppendValue(r.MessagesDropped)
-                    .AppendValue(r.CpuUsagePercent)
-                    .AppendValue(r.MemoryUsageMb)
-                    .AppendValue(r.AvailableMemoryMb)
-                    .AppendValue(r.AvgLatencyMs)
-                    .AppendValue(r.TotalRequests)
-                    // Catalog metrics
-                    .AppendValue(r.ActivationWorkingSet)
-                    .AppendValue(r.ActivationsCreated)
-                    .AppendValue(r.ActivationsDestroyed)
-                    .AppendValue(r.ActivationsFailedToActivate)
-                    .AppendValue(r.ActivationCollections)
-                    .AppendValue(r.ActivationShutdowns)
-                    .AppendValue(r.ActivationNonExistent)
-                    .AppendValue(r.ConcurrentRegistrationAttempts)
-                    // Miscellaneous grain metrics
-                    .AppendValue(r.GrainCount)
-                    .AppendValue(r.SystemTargets)
-                    .EndRow();
+                case ClusterMetricRecord r: cluster.Add(r); break;
+                case GrainMetricRecord r: grain.Add(r); break;
+                case GrainTypeActivationRecord r: grainTypeActivation.Add(r); break;
+                case MethodMetricRecord r: method.Add(r); break;
+                case MethodProfileRecord r: methodProfile.Add(r); break;
             }
         }
 
-        // Flush grain metrics using Appender with span-based iteration
-        if (_grainBuffer.Count > 0)
-        {
-            using var appender = connection.CreateAppender("grain_metrics");
-            var span = CollectionsMarshal.AsSpan(_grainBuffer);
-            foreach (ref readonly var r in span)
-            {
-                appender.CreateRow()
-                    .AppendValue(r.Timestamp)
-                    .AppendValue(r.SiloId)
-                    .AppendValue(r.GrainType)
-                    .AppendValue(r.TotalRequests)
-                    .AppendValue(r.FailedRequests)
-                    .AppendValue(r.AvgLatencyMs)
-                    .AppendValue(r.MinLatencyMs)
-                    .AppendValue(r.MaxLatencyMs)
-                    .AppendValue(r.RequestsPerSecond)
-                    .EndRow();
-            }
-        }
+        return new PartitionedRecords(cluster, grain, grainTypeActivation, method, methodProfile);
+    }
 
-        // Flush method metrics using Appender with span-based iteration
-        if (_methodBuffer.Count > 0)
-        {
-            using var appender = connection.CreateAppender("method_metrics");
-            var span = CollectionsMarshal.AsSpan(_methodBuffer);
-            foreach (ref readonly var r in span)
-            {
-                appender.CreateRow()
-                    .AppendValue(r.Timestamp)
-                    .AppendValue(r.SiloId)
-                    .AppendValue(r.GrainType)
-                    .AppendValue(r.MethodName)
-                    .AppendValue(r.TotalRequests)
-                    .AppendValue(r.FailedRequests)
-                    .AppendValue(r.AvgLatencyMs)
-                    .AppendValue(r.RequestsPerSecond)
-                    .EndRow();
-            }
-        }
+    private readonly record struct PartitionedRecords(
+        List<ClusterMetricRecord> Cluster,
+        List<GrainMetricRecord> Grain,
+        List<GrainTypeActivationRecord> GrainTypeActivation,
+        List<MethodMetricRecord> Method,
+        List<MethodProfileRecord> MethodProfile);
 
-        // Flush method profile metrics using Appender with span-based iteration
-        // This stores raw totals for accurate average calculation: avg = total_elapsed_ms / call_count
-        if (_methodProfileBuffer.Count > 0)
-        {
-            using var appender = connection.CreateAppender("method_profile");
-            var span = CollectionsMarshal.AsSpan(_methodProfileBuffer);
-            foreach (ref readonly var r in span)
-            {
-                appender.CreateRow()
-                    .AppendValue(r.Timestamp)
-                    .AppendValue(r.SiloId)
-                    .AppendValue(r.HostName)
-                    .AppendValue(r.GrainType)
-                    .AppendValue(r.MethodName)
-                    .AppendValue(r.CallCount)
-                    .AppendValue(r.TotalElapsedMs)
-                    .AppendValue(r.ExceptionCount)
-                    .EndRow();
-            }
-        }
+    private static void FlushClusterMetrics(DuckDB.NET.Data.DuckDBConnection connection, List<ClusterMetricRecord> records)
+    {
+        if (records.Count == 0) return;
 
-        // Flush grain type activation metrics using Appender with span-based iteration
-        // This stores per-grain-type activation counts from the orleans-grains metric
-        if (_grainTypeActivationBuffer.Count > 0)
+        using var appender = connection.CreateAppender("cluster_metrics");
+        var span = CollectionsMarshal.AsSpan(records);
+
+        foreach (ref readonly var r in span)
         {
-            using var appender = connection.CreateAppender("grain_type_activations");
-            var span = CollectionsMarshal.AsSpan(_grainTypeActivationBuffer);
-            foreach (ref readonly var r in span)
+            appender.CreateRow()
+                .AppendValue(r.Timestamp)
+                .AppendValue(r.SiloId)
+                .AppendValue(r.HostName)
+                .AppendValue(r.TotalActivations)
+                .AppendValue(r.ConnectedClients)
+                .AppendValue(r.MessagesSent)
+                .AppendValue(r.MessagesReceived)
+                .AppendValue(r.MessagesDropped)
+                .AppendValue(r.CpuUsagePercent)
+                .AppendValue(r.MemoryUsageMb)
+                .AppendValue(r.AvailableMemoryMb)
+                .AppendValue(r.AvgLatencyMs)
+                .AppendValue(r.TotalRequests)
+                .AppendValue(r.ActivationWorkingSet)
+                .AppendValue(r.ActivationsCreated)
+                .AppendValue(r.ActivationsDestroyed)
+                .AppendValue(r.ActivationsFailedToActivate)
+                .AppendValue(r.ActivationCollections)
+                .AppendValue(r.ActivationShutdowns)
+                .AppendValue(r.ActivationNonExistent)
+                .AppendValue(r.ConcurrentRegistrationAttempts)
+                .AppendValue(r.GrainCount)
+                .AppendValue(r.SystemTargets)
+                .EndRow();
+        }
+    }
+
+    private static void FlushGrainMetrics(DuckDB.NET.Data.DuckDBConnection connection, List<GrainMetricRecord> records)
+    {
+        if (records.Count == 0) return;
+
+        using var appender = connection.CreateAppender("grain_metrics");
+        var span = CollectionsMarshal.AsSpan(records);
+
+        foreach (ref readonly var r in span)
+        {
+            appender.CreateRow()
+                .AppendValue(r.Timestamp)
+                .AppendValue(r.SiloId)
+                .AppendValue(r.GrainType)
+                .AppendValue(r.TotalRequests)
+                .AppendValue(r.FailedRequests)
+                .AppendValue(r.AvgLatencyMs)
+                .AppendValue(r.MinLatencyMs)
+                .AppendValue(r.MaxLatencyMs)
+                .AppendValue(r.RequestsPerSecond)
+                .EndRow();
+        }
+    }
+
+    private static void FlushGrainTypeActivations(DuckDB.NET.Data.DuckDBConnection connection, List<GrainTypeActivationRecord> records)
+    {
+        if (records.Count == 0) return;
+
+        using var appender = connection.CreateAppender("grain_type_activations");
+        var span = CollectionsMarshal.AsSpan(records);
+
+        foreach (ref readonly var r in span)
+        {
+            appender.CreateRow()
+                .AppendValue(r.Timestamp)
+                .AppendValue(r.SiloId)
+                .AppendValue(r.GrainType)
+                .AppendValue(r.Activations)
+                .EndRow();
+        }
+    }
+
+    private static void FlushMethodMetrics(DuckDB.NET.Data.DuckDBConnection connection, List<MethodMetricRecord> records)
+    {
+        if (records.Count == 0) return;
+
+        using var appender = connection.CreateAppender("method_metrics");
+        var span = CollectionsMarshal.AsSpan(records);
+
+        foreach (ref readonly var r in span)
+        {
+            appender.CreateRow()
+                .AppendValue(r.Timestamp)
+                .AppendValue(r.SiloId)
+                .AppendValue(r.GrainType)
+                .AppendValue(r.MethodName)
+                .AppendValue(r.TotalRequests)
+                .AppendValue(r.FailedRequests)
+                .AppendValue(r.AvgLatencyMs)
+                .AppendValue(r.RequestsPerSecond)
+                .EndRow();
+        }
+    }
+
+    private static void FlushMethodProfileMetrics(DuckDB.NET.Data.DuckDBConnection connection, List<MethodProfileRecord> records)
+    {
+        if (records.Count == 0) return;
+
+        using var appender = connection.CreateAppender("method_profile");
+        var span = CollectionsMarshal.AsSpan(records);
+
+        foreach (ref readonly var r in span)
+        {
+            appender.CreateRow()
+                .AppendValue(r.Timestamp)
+                .AppendValue(r.SiloId)
+                .AppendValue(r.HostName)
+                .AppendValue(r.GrainType)
+                .AppendValue(r.MethodName)
+                .AppendValue(r.CallCount)
+                .AppendValue(r.TotalElapsedMs)
+                .AppendValue(r.ExceptionCount)
+                .EndRow();
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _disposed = true;
+        _channel.Writer.Complete();
+
+        // Wait for consumer to finish processing remaining items
+        var spinWait = new SpinWait();
+        while (Volatile.Read(ref _consumerRunning) == 1)
+        {
+            spinWait.SpinOnce();
+            if (spinWait.NextSpinWillYield)
             {
-                appender.CreateRow()
-                    .AppendValue(r.Timestamp)
-                    .AppendValue(r.SiloId)
-                    .AppendValue(r.GrainType)
-                    .AppendValue(r.Activations)
-                    .EndRow();
+                await Task.Delay(10);
             }
         }
     }
@@ -335,7 +420,9 @@ internal sealed class InsightsMetricsBuffer
 
 #region Buffer Record Types
 
-internal readonly record struct ClusterMetricRecord(
+internal abstract record MetricRecord;
+
+internal sealed record ClusterMetricRecord(
     DateTime Timestamp,
     string SiloId,
     string HostName,
@@ -349,7 +436,6 @@ internal readonly record struct ClusterMetricRecord(
     long AvailableMemoryMb,
     double AvgLatencyMs,
     long TotalRequests,
-    // Catalog metrics (activation lifecycle)
     long ActivationWorkingSet,
     long ActivationsCreated,
     long ActivationsDestroyed,
@@ -358,11 +444,10 @@ internal readonly record struct ClusterMetricRecord(
     long ActivationShutdowns,
     long ActivationNonExistent,
     long ConcurrentRegistrationAttempts,
-    // Miscellaneous grain metrics
     long GrainCount,
-    long SystemTargets);
+    long SystemTargets) : MetricRecord;
 
-internal readonly record struct GrainMetricRecord(
+internal sealed record GrainMetricRecord(
     DateTime Timestamp,
     string SiloId,
     string GrainType,
@@ -371,9 +456,15 @@ internal readonly record struct GrainMetricRecord(
     double AvgLatencyMs,
     double MinLatencyMs,
     double MaxLatencyMs,
-    double RequestsPerSecond);
+    double RequestsPerSecond) : MetricRecord;
 
-internal readonly record struct MethodMetricRecord(
+internal sealed record GrainTypeActivationRecord(
+    DateTime Timestamp,
+    string SiloId,
+    string GrainType,
+    long Activations) : MetricRecord;
+
+internal sealed record MethodMetricRecord(
     DateTime Timestamp,
     string SiloId,
     string GrainType,
@@ -381,13 +472,9 @@ internal readonly record struct MethodMetricRecord(
     long TotalRequests,
     long FailedRequests,
     double AvgLatencyMs,
-    double RequestsPerSecond);
+    double RequestsPerSecond) : MetricRecord;
 
-/// <summary>
-/// Buffer record for method profile data (OrleansDashboard-style accurate totals).
-/// Stores raw totals enabling accurate average calculation: avg = TotalElapsedMs / CallCount.
-/// </summary>
-internal readonly record struct MethodProfileRecord(
+internal sealed record MethodProfileRecord(
     DateTime Timestamp,
     string SiloId,
     string HostName,
@@ -395,16 +482,6 @@ internal readonly record struct MethodProfileRecord(
     string MethodName,
     long CallCount,
     double TotalElapsedMs,
-    long ExceptionCount);
-
-/// <summary>
-/// Buffer record for per-grain-type activation counts from orleans-grains metric.
-/// Captures the grain.type tag value from OTel metrics for per-silo grain type tracking.
-/// </summary>
-internal readonly record struct GrainTypeActivationRecord(
-    DateTime Timestamp,
-    string SiloId,
-    string GrainType,
-    long Activations);
+    long ExceptionCount) : MetricRecord;
 
 #endregion
