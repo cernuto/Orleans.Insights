@@ -48,15 +48,8 @@ public sealed class DashboardSignalRService : IDashboardDataService
 
     public event Action<bool>? OnConnectionStateChanged;
 
-    // Retry delays for initial connection (exponential backoff: 0s, 1s, 2s, 5s, 10s)
-    private static readonly TimeSpan[] InitialConnectionRetryDelays =
-    [
-        TimeSpan.Zero,
-        TimeSpan.FromSeconds(1),
-        TimeSpan.FromSeconds(2),
-        TimeSpan.FromSeconds(5),
-        TimeSpan.FromSeconds(10)
-    ];
+    // Fibonacci sequence in ms, capped at 2100ms
+    private static readonly int[] FibonacciDelaysMs = [100, 100, 200, 300, 500, 800, 1300, 2100];
 
     public async Task StartAsync()
     {
@@ -70,7 +63,7 @@ public sealed class DashboardSignalRService : IDashboardDataService
         // This ensures the dashboard stays connected even with intermittent network issues
         _hubConnection = new HubConnectionBuilder()
             .WithUrl(hubUrl)
-            .WithAutomaticReconnect(new InfiniteInstantRetryPolicy())
+            .WithAutomaticReconnect(new FibonacciRetryPolicy())
             .Build();
 
         // Register handlers for server-pushed page data
@@ -101,16 +94,18 @@ public sealed class DashboardSignalRService : IDashboardDataService
             OnConnectionStateChanged?.Invoke(true);
         };
 
-        // Retry initial connection with exponential backoff
+        // Retry initial connection with Fibonacci backoff (never gives up)
         // WithAutomaticReconnect only works AFTER a successful connection
-        for (var attempt = 0; attempt < InitialConnectionRetryDelays.Length; attempt++)
+        var attempt = 0;
+
+        while (!_disposed)
         {
-            var delay = InitialConnectionRetryDelays[attempt];
-            if (delay > TimeSpan.Zero)
+            if (attempt > 0)
             {
-                _logger.LogInformation("Retrying SignalR connection in {DelayMs}ms (attempt {Attempt}/{Max})",
-                    delay.TotalMilliseconds, attempt + 1, InitialConnectionRetryDelays.Length);
-                await Task.Delay(delay);
+                var delayMs = FibonacciDelaysMs[Math.Min(attempt - 1, FibonacciDelaysMs.Length - 1)];
+                _logger.LogInformation("Retrying SignalR connection in {DelayMs}ms (attempt {Attempt})",
+                    delayMs, attempt + 1);
+                await Task.Delay(delayMs);
             }
 
             try
@@ -123,14 +118,10 @@ public sealed class DashboardSignalRService : IDashboardDataService
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "SignalR connection attempt {Attempt}/{Max} failed",
-                    attempt + 1, InitialConnectionRetryDelays.Length);
+                _logger.LogWarning(ex, "SignalR connection attempt {Attempt} failed", attempt + 1);
+                attempt++;
             }
         }
-
-        _logger.LogError("Failed to connect to dashboard hub after {Attempts} attempts",
-            InitialConnectionRetryDelays.Length);
-        OnConnectionStateChanged?.Invoke(false);
     }
 
     /// <summary>
@@ -393,11 +384,17 @@ public sealed class DashboardSignalRService : IDashboardDataService
 }
 
 /// <summary>
-/// Retry policy that retries immediately and infinitely.
-/// Always returns TimeSpan.Zero to retry instantly without giving up.
-/// Better UX for monitoring dashboards that need to stay connected.
+/// Retry policy using Fibonacci sequence capped at 2100ms.
+/// Sequence: 100ms, 100ms, 200ms, 300ms, 500ms, 800ms, 1300ms, 2100ms (cap), ...
+/// Never gives up - better UX for monitoring dashboards that need to stay connected.
 /// </summary>
-file class InfiniteInstantRetryPolicy : IRetryPolicy
+file class FibonacciRetryPolicy : IRetryPolicy
 {
-    public TimeSpan? NextRetryDelay(RetryContext retryContext) => TimeSpan.Zero;
+    private static readonly int[] FibonacciDelaysMs = [100, 100, 200, 300, 500, 800, 1300, 2100];
+
+    public TimeSpan? NextRetryDelay(RetryContext retryContext)
+    {
+        var index = (int)Math.Min(retryContext.PreviousRetryCount, FibonacciDelaysMs.Length - 1);
+        return TimeSpan.FromMilliseconds(FibonacciDelaysMs[index]);
+    }
 }
