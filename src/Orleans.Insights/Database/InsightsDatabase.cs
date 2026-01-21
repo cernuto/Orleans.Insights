@@ -6,15 +6,33 @@ namespace Orleans.Insights.Database;
 
 /// <summary>
 /// DuckDB database wrapper for Orleans Insights analytics.
-/// Uses in-memory mode with single-threaded configuration, optimized for Orleans grain turn-based concurrency.
+/// Uses in-memory mode with MVCC support via connection duplication.
 /// </summary>
 /// <remarks>
+/// <para>
+/// <b>MVCC Architecture:</b>
+/// DuckDB supports Multi-Version Concurrency Control (MVCC) which allows concurrent reads
+/// and writes without blocking. This is achieved by using <see cref="DuckDBConnection.Duplicate"/>
+/// to create separate connections that share the same in-memory database:
+/// <list type="bullet">
+/// <item><see cref="WriteConnection"/> - Primary connection for schema and bulk writes (Appender)</item>
+/// <item><see cref="CreateReadConnection"/> - Creates duplicated connections for queries</item>
+/// </list>
+/// </para>
+/// <para>
+/// <b>Thread Safety:</b>
+/// Each connection should only be used from a single thread at a time. The write connection
+/// is used by the background consumer thread. Read connections should be created per-query
+/// or pooled with proper synchronization.
+/// </para>
+/// <para>
 /// SOLID principles applied:
 /// - SRP: Query execution, value conversion, and metadata queries are delegated to separate components
 /// - OCP: New behaviors can be added via new implementations of the injected interfaces
 /// - LSP: All implementations are substitutable through their interfaces
 /// - ISP: Separate interfaces for query execution, value conversion, and metadata
 /// - DIP: Depends on abstractions (interfaces) rather than concrete implementations
+/// </para>
 /// </remarks>
 public sealed class InsightsDatabase : IInsightsDatabase
 {
@@ -95,7 +113,8 @@ public sealed class InsightsDatabase : IInsightsDatabase
     public DatabaseMetrics Metrics => _metrics;
 
     /// <summary>
-    /// Gets the connection for bulk operations (e.g., appender).
+    /// Gets the primary connection for bulk write operations (e.g., Appender).
+    /// This connection should only be used by the background consumer thread.
     /// </summary>
     public DuckDBConnection WriteConnection
     {
@@ -107,8 +126,28 @@ public sealed class InsightsDatabase : IInsightsDatabase
     }
 
     /// <summary>
-    /// Gets the connection for query operations.
+    /// Creates a new read connection via <see cref="DuckDBConnection.Duplicate"/>.
+    /// This enables MVCC - reads can proceed concurrently with writes.
     /// </summary>
+    /// <remarks>
+    /// The caller is responsible for disposing the returned connection.
+    /// For best performance, consider pooling connections or using a single
+    /// read connection per query batch.
+    /// </remarks>
+    /// <returns>A new connection sharing the same in-memory database.</returns>
+    public DuckDBConnection CreateReadConnection()
+    {
+        ThrowIfDisposed();
+        var conn = _connection.Duplicate();
+        conn.Open();
+        return conn;
+    }
+
+    /// <summary>
+    /// Gets the primary connection for query operations.
+    /// Consider using <see cref="CreateReadConnection"/> for concurrent read/write scenarios.
+    /// </summary>
+    [Obsolete("Use CreateReadConnection() for MVCC-enabled concurrent reads. This property will be removed in a future version.")]
     public DuckDBConnection ReadConnection
     {
         get
@@ -269,6 +308,100 @@ public sealed class InsightsDatabase : IInsightsDatabase
         command.CommandText = sql;
         return _queryExecutor.ExecuteScalar<T>(command);
     }
+
+    #region Async Query Methods (MVCC-enabled)
+
+    /// <summary>
+    /// Executes a query asynchronously using a duplicated connection (MVCC).
+    /// Runs on thread pool to not block the grain scheduler.
+    /// </summary>
+    public Task<List<Dictionary<string, object?>>> QueryAsync(string sql)
+    {
+        ThrowIfDisposed();
+        return Task.Run(() =>
+        {
+            using var readConn = CreateReadConnection();
+            using var command = readConn.CreateCommand();
+            command.CommandText = sql;
+
+            var startTime = _timeProvider.GetTimestamp();
+            var results = _queryExecutor.ExecuteQuery(command);
+            var elapsed = _timeProvider.GetElapsedTime(startTime);
+
+            _metrics.RecordQueryExecution(GetQueryName(sql), elapsed, results.Count);
+            return results;
+        });
+    }
+
+    /// <summary>
+    /// Executes a parameterized query asynchronously using a duplicated connection (MVCC).
+    /// Runs on thread pool to not block the grain scheduler.
+    /// </summary>
+    public Task<List<Dictionary<string, object?>>> QueryAsync(string sql, params object[] parameters)
+    {
+        ThrowIfDisposed();
+        return Task.Run(() =>
+        {
+            using var readConn = CreateReadConnection();
+            using var command = readConn.CreateCommand();
+            command.CommandText = sql;
+            _queryExecutor.AddParameters(command, parameters);
+
+            var startTime = _timeProvider.GetTimestamp();
+            var results = _queryExecutor.ExecuteQuery(command);
+            var elapsed = _timeProvider.GetElapsedTime(startTime);
+
+            _metrics.RecordQueryExecution(GetQueryName(sql), elapsed, results.Count);
+            return results;
+        });
+    }
+
+    /// <summary>
+    /// Executes a query and returns JSON asynchronously using a duplicated connection (MVCC).
+    /// Runs on thread pool to not block the grain scheduler.
+    /// </summary>
+    public Task<string> QueryJsonAsync(string sql)
+    {
+        ThrowIfDisposed();
+        return Task.Run(() =>
+        {
+            using var readConn = CreateReadConnection();
+            using var command = readConn.CreateCommand();
+            command.CommandText = sql;
+
+            var startTime = _timeProvider.GetTimestamp();
+            var json = _queryExecutor.ExecuteQueryToJson(command, out var rowCount);
+            var elapsed = _timeProvider.GetElapsedTime(startTime);
+
+            _metrics.RecordQueryExecution(GetQueryName(sql), elapsed, rowCount);
+            return json;
+        });
+    }
+
+    /// <summary>
+    /// Executes a parameterized query and returns JSON asynchronously using a duplicated connection (MVCC).
+    /// Runs on thread pool to not block the grain scheduler.
+    /// </summary>
+    public Task<string> QueryJsonAsync(string sql, params object[] parameters)
+    {
+        ThrowIfDisposed();
+        return Task.Run(() =>
+        {
+            using var readConn = CreateReadConnection();
+            using var command = readConn.CreateCommand();
+            command.CommandText = sql;
+            _queryExecutor.AddParameters(command, parameters);
+
+            var startTime = _timeProvider.GetTimestamp();
+            var json = _queryExecutor.ExecuteQueryToJson(command, out var rowCount);
+            var elapsed = _timeProvider.GetElapsedTime(startTime);
+
+            _metrics.RecordQueryExecution(GetQueryName(sql), elapsed, rowCount);
+            return json;
+        });
+    }
+
+    #endregion
 
     /// <inheritdoc />
     public void ApplyRetention(string tableName, string timestampColumn, TimeSpan retention)
