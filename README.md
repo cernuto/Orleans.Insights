@@ -72,7 +72,8 @@ Silos (Metrics Collection)
     │
     ▼
 InsightsGrain (Singleton)
-    │ ├── DuckDB (time-series storage)
+    │ ├── Channel-based buffer (non-blocking ingestion)
+    │ ├── DuckDB (time-series storage with MVCC)
     │ ├── In-memory aggregations
     │ └── Change detection
     ▼
@@ -84,6 +85,22 @@ SignalR Hub
     ▼
 Blazor WASM Dashboard
 ```
+
+## Performance Design
+
+Orleans.Insights is designed to minimize impact on your Orleans cluster:
+
+### Non-Blocking Ingestion
+Metrics are ingested via a lock-free `Channel<T>` with `BoundedChannelFullMode.DropOldest`. Producers never block - if the channel is full, the oldest metrics are dropped rather than causing backpressure. This ensures grain method calls are never delayed by metrics collection.
+
+### MVCC Reads
+DuckDB connections are duplicated via `Duplicate()` for read operations, enabling true MVCC (Multi-Version Concurrency Control). Queries run on the thread pool with their own connection while writes continue uninterrupted on the main connection.
+
+### Cooperative Yielding
+The background consumer yields control every 500 records, 50ms, or 3 batch flushes to prevent thread pool starvation. This ensures the silo remains responsive even under heavy metrics load.
+
+### Bounded Memory Growth
+In-memory aggregations use LRU eviction with configurable limits (`MaxMetricsEntries`). This prevents unbounded memory growth in long-running silos with many grain types.
 
 ## Projects
 
@@ -161,6 +178,13 @@ public class InsightsOptions
 
     // Batch flush threshold for DuckDB writes (default: 1000)
     public int BatchFlushThreshold { get; set; }
+
+    // Capacity of the bounded channel for metrics buffering (default: 10,000)
+    // When full, oldest items are dropped (backpressure handling)
+    public int ChannelCapacity { get; set; }
+
+    // Maximum grain types/methods to track before LRU eviction (default: 10,000)
+    public int MaxMetricsEntries { get; set; }
 
     // Require authentication for dashboard (default: false)
     public bool RequireAuthentication { get; set; }
