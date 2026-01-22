@@ -93,11 +93,11 @@ Orleans.Insights is designed to minimize impact on your Orleans cluster:
 ### Non-Blocking Ingestion
 Metrics are ingested via a lock-free `Channel<T>` with `BoundedChannelFullMode.DropOldest`. Producers never block - if the channel is full, the oldest metrics are dropped rather than causing backpressure. This ensures grain method calls are never delayed by metrics collection.
 
-### MVCC Reads
-DuckDB connections are duplicated via `Duplicate()` for read operations, enabling true MVCC (Multi-Version Concurrency Control). Queries run on the thread pool with their own connection while writes continue uninterrupted on the main connection.
+### Dedicated Consumer Thread
+A single persistent consumer runs on a dedicated `LongRunning` thread, completely isolated from the Orleans thread pool. This eliminates any risk of thread pool starvation. The consumer uses `WaitToReadAsync` for efficient signaling - the thread is released when idle and resumed when items arrive.
 
-### Cooperative Yielding
-The background consumer yields control every 500 records, 50ms, or 3 batch flushes to prevent thread pool starvation. This ensures the silo remains responsive even under heavy metrics load.
+### MVCC Reads
+DuckDB connections are duplicated via `Duplicate()` for read operations, enabling true MVCC (Multi-Version Concurrency Control). Dashboard queries use their own connection while writes continue uninterrupted on the main connection.
 
 ### Bounded Memory Growth
 In-memory aggregations use LRU eviction with configurable limits (`MaxMetricsEntries`). This prevents unbounded memory growth in long-running silos with many grain types.
