@@ -1692,9 +1692,6 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
 
         try
         {
-            // Ensure any pending buffers are being processed
-            _buffer?.EnsureProcessing();
-
             // Apply retention policies
             _schemaManager?.ApplyRetention(Settings.RetentionPeriod);
 

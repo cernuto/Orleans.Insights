@@ -13,23 +13,24 @@ namespace Orleans.Insights.Schema;
 
 /// <summary>
 /// Manages batch buffering and flushing for Insights metrics using a Channel-based
-/// producer-consumer pattern with cooperative yielding.
+/// producer-consumer pattern with a persistent consumer thread.
 /// </summary>
 /// <remarks>
 /// <para>
 /// <b>Design Goals:</b>
 /// <list type="bullet">
 /// <item>Ingestion is completely non-blocking for the grain (fire-and-forget)</item>
-/// <item>Consumer yields regularly to prevent thread pool starvation</item>
+/// <item>Single persistent consumer thread eliminates race conditions with SingleReader channel</item>
+/// <item>Consumer uses WaitToReadAsync for efficient signaling (releases thread when idle)</item>
 /// <item>Backpressure via bounded channel with DropOldest (graceful degradation)</item>
-/// <item>Consumer exits on idle to free thread pool resources</item>
+/// <item>Dedicated LongRunning thread avoids Orleans thread pool starvation</item>
 /// </list>
 /// </para>
 /// <para>
 /// <b>Thread Safety:</b>
 /// Producer methods (Buffer*) can be called from any context - they only do a TryWrite
-/// to the channel which is lock-free. The consumer runs on a dedicated thread pool thread
-/// and has exclusive read access to the channel (SingleReader=true).
+/// to the channel which is lock-free. A single persistent consumer thread has exclusive
+/// read access to the channel (SingleReader=true), eliminating race conditions.
 /// </para>
 /// <para>
 /// <b>Span Safety:</b>
@@ -44,23 +45,20 @@ internal sealed class InsightsMetricsBuffer : IAsyncDisposable
     private readonly ILogger _logger;
     private readonly InsightsOptions _settings;
     private readonly InsightsDatabase _database;
+    private readonly CancellationTokenSource _cts;
+    private readonly Task _consumerTask;
 
-    private int _consumerState; // 0=stopped, 1=running, 2=stopping
     private volatile bool _disposed;
     private long _totalWritten;
     private long _totalDropped;
     private long _totalFlushed;
-
-    // Yielding configuration - yield every N records or M milliseconds to prevent thread starvation
-    private const int YieldAfterRecords = 500;
-    private const int YieldAfterMs = 50;
-    private const int MaxBatchesBeforeYield = 3;
 
     public InsightsMetricsBuffer(ILogger logger, InsightsOptions settings, InsightsDatabase database)
     {
         _logger = logger;
         _settings = settings;
         _database = database;
+        _cts = new CancellationTokenSource();
 
         // Bounded channel with DropOldest provides backpressure without blocking producers
         // SingleReader=true enables lock-free optimizations in the channel
@@ -70,6 +68,14 @@ internal sealed class InsightsMetricsBuffer : IAsyncDisposable
             SingleReader = true,
             SingleWriter = false // Multiple silos may send concurrently
         });
+
+        // Start a single persistent consumer on a dedicated thread (LongRunning)
+        // This avoids Orleans thread pool starvation and eliminates consumer state race conditions
+        _consumerTask = Task.Factory.StartNew(
+            () => ConsumerLoopAsync(_cts.Token),
+            _cts.Token,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default).Unwrap();
     }
 
     /// <summary>
@@ -138,9 +144,7 @@ internal sealed class InsightsMetricsBuffer : IAsyncDisposable
                 mm.TotalRequests, mm.FailedRequests,
                 mm.AverageLatencyMs, mm.RequestsPerSecond));
         }
-
-        // Ensure consumer is running (non-blocking check)
-        EnsureConsumerRunning();
+        // Consumer is always running - no need to start it
     }
 
     /// <summary>
@@ -161,19 +165,6 @@ internal sealed class InsightsMetricsBuffer : IAsyncDisposable
                 entry.GrainType, entry.Method,
                 entry.Count, entry.TotalElapsedMs, entry.ExceptionCount));
         }
-
-        EnsureConsumerRunning();
-    }
-
-    /// <summary>
-    /// Ensures the consumer is running. Called from maintenance to handle edge cases.
-    /// </summary>
-    public void EnsureProcessing()
-    {
-        if (!_disposed && _channel.Reader.TryPeek(out _))
-        {
-            EnsureConsumerRunning();
-        }
     }
 
     /// <summary>
@@ -192,108 +183,62 @@ internal sealed class InsightsMetricsBuffer : IAsyncDisposable
     }
 
     /// <summary>
-    /// Starts the consumer if not already running. Lock-free via Interlocked.
+    /// Persistent consumer loop that runs on a dedicated thread.
+    /// Uses WaitToReadAsync for efficient signaling - the thread is released when idle
+    /// and resumed when items arrive.
     /// </summary>
-    private void EnsureConsumerRunning()
-    {
-        // Only start if currently stopped (0 -> 1)
-        if (Interlocked.CompareExchange(ref _consumerState, 1, 0) == 0)
-        {
-            // Use Task.Run to run consumer on thread pool
-            // The consumer will manage its own lifecycle
-            _ = Task.Run(ConsumeWithYieldingAsync);
-        }
-    }
-
-    /// <summary>
-    /// Consumer loop with cooperative yielding to prevent thread pool starvation.
-    /// </summary>
-    private async Task ConsumeWithYieldingAsync()
+    private async Task ConsumerLoopAsync(CancellationToken cancellationToken)
     {
         var batch = new List<MetricRecord>(_settings.BatchFlushThreshold);
-        var idleTimeout = _settings.BatchFlushInterval;
-        var batchesSinceYield = 0;
-        var sw = Stopwatch.StartNew();
 
-        _logger.LogDebug("Metrics consumer started");
+        _logger.LogDebug("Metrics consumer started on dedicated thread");
 
         try
         {
-            while (!_disposed)
+            // Wait for items to arrive - this efficiently releases the thread when idle
+            while (await _channel.Reader.WaitToReadAsync(cancellationToken))
             {
                 batch.Clear();
-                var recordsThisCycle = 0;
-                sw.Restart();
 
-                // Drain available items with yielding
-                while (batch.Count < _settings.BatchFlushThreshold)
+                // Drain available items up to batch threshold
+                while (batch.Count < _settings.BatchFlushThreshold &&
+                       _channel.Reader.TryRead(out var record))
                 {
-                    if (!_channel.Reader.TryRead(out var record))
-                        break;
-
                     batch.Add(record);
-                    recordsThisCycle++;
-
-                    // Yield periodically during large drains to prevent starvation
-                    if (recordsThisCycle >= YieldAfterRecords || sw.ElapsedMilliseconds >= YieldAfterMs)
-                    {
-                        await Task.Yield();
-                        recordsThisCycle = 0;
-                        sw.Restart();
-                    }
                 }
 
                 if (batch.Count > 0)
                 {
                     FlushBatch(batch);
-                    batchesSinceYield++;
-
-                    // Yield after processing several batches
-                    if (batchesSinceYield >= MaxBatchesBeforeYield)
-                    {
-                        await Task.Yield();
-                        batchesSinceYield = 0;
-                    }
-                }
-                else
-                {
-                    // Channel empty - wait for more items or timeout
-                    batchesSinceYield = 0;
-
-                    using var cts = new CancellationTokenSource(idleTimeout);
-                    try
-                    {
-                        // This await allows other work to proceed
-                        var record = await _channel.Reader.ReadAsync(cts.Token);
-                        batch.Add(record);
-
-                        // Drain any others that arrived while we were waiting
-                        while (batch.Count < _settings.BatchFlushThreshold &&
-                               _channel.Reader.TryRead(out var additional))
-                        {
-                            batch.Add(additional);
-                        }
-
-                        FlushBatch(batch);
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        // Idle timeout - exit consumer to free thread pool
-                        _logger.LogDebug("Metrics consumer exiting after idle timeout");
-                        return;
-                    }
                 }
             }
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Normal shutdown - drain remaining items
+            _logger.LogDebug("Metrics consumer shutdown requested, draining remaining items");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Metrics consumer encountered an error");
+        }
         finally
         {
-            // Mark as stopped, allowing restart if items arrive
-            Interlocked.Exchange(ref _consumerState, 0);
-
-            // Check if items arrived while we were shutting down
-            if (!_disposed && _channel.Reader.TryPeek(out _))
+            // Drain any remaining items on shutdown
+            batch.Clear();
+            while (_channel.Reader.TryRead(out var record))
             {
-                EnsureConsumerRunning();
+                batch.Add(record);
+                if (batch.Count >= _settings.BatchFlushThreshold)
+                {
+                    FlushBatch(batch);
+                    batch.Clear();
+                }
+            }
+
+            if (batch.Count > 0)
+            {
+                FlushBatch(batch);
             }
 
             _logger.LogDebug("Metrics consumer stopped (flushed: {TotalFlushed}, dropped: {TotalDropped})",
@@ -497,22 +442,26 @@ internal sealed class InsightsMetricsBuffer : IAsyncDisposable
         if (_disposed) return;
         _disposed = true;
 
+        // Signal the consumer to stop and complete the channel
         _channel.Writer.Complete();
+        await _cts.CancelAsync();
 
         // Wait for consumer to finish with timeout
-        var timeout = TimeSpan.FromSeconds(5);
-        var sw = Stopwatch.StartNew();
-
-        while (Volatile.Read(ref _consumerState) != 0 && sw.Elapsed < timeout)
+        try
         {
-            await Task.Delay(50);
+            await _consumerTask.WaitAsync(TimeSpan.FromSeconds(5));
         }
-
-        if (Volatile.Read(ref _consumerState) != 0)
+        catch (TimeoutException)
         {
             _logger.LogWarning("Metrics consumer did not stop within timeout, {Pending} records may be lost",
                 _channel.Reader.Count);
         }
+        catch (OperationCanceledException)
+        {
+            // Expected during shutdown
+        }
+
+        _cts.Dispose();
 
         _logger.LogInformation("InsightsMetricsBuffer disposed (written: {Written}, flushed: {Flushed}, dropped: {Dropped})",
             TotalWritten, TotalFlushed, TotalDropped);

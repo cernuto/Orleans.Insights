@@ -24,7 +24,8 @@
       "Bash(dotnet new:*)",
       "Bash(dotnet run:*)",
       "Bash(Select-Object -First 5)",
-      "Bash(findstr:*)"
+      "Bash(findstr:*)",
+      "Bash(dotnet test:*)"
     ]
   }
 }

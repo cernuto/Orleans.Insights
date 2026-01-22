@@ -143,20 +143,6 @@ public sealed class InsightsDatabase : IInsightsDatabase
         return conn;
     }
 
-    /// <summary>
-    /// Gets the primary connection for query operations.
-    /// Consider using <see cref="CreateReadConnection"/> for concurrent read/write scenarios.
-    /// </summary>
-    [Obsolete("Use CreateReadConnection() for MVCC-enabled concurrent reads. This property will be removed in a future version.")]
-    public DuckDBConnection ReadConnection
-    {
-        get
-        {
-            ThrowIfDisposed();
-            return _connection;
-        }
-    }
-
     /// <inheritdoc />
     public void Execute(string sql)
     {
@@ -308,100 +294,6 @@ public sealed class InsightsDatabase : IInsightsDatabase
         command.CommandText = sql;
         return _queryExecutor.ExecuteScalar<T>(command);
     }
-
-    #region Async Query Methods (MVCC-enabled)
-
-    /// <summary>
-    /// Executes a query asynchronously using a duplicated connection (MVCC).
-    /// Runs on thread pool to not block the grain scheduler.
-    /// </summary>
-    public Task<List<Dictionary<string, object?>>> QueryAsync(string sql)
-    {
-        ThrowIfDisposed();
-        return Task.Run(() =>
-        {
-            using var readConn = CreateReadConnection();
-            using var command = readConn.CreateCommand();
-            command.CommandText = sql;
-
-            var startTime = _timeProvider.GetTimestamp();
-            var results = _queryExecutor.ExecuteQuery(command);
-            var elapsed = _timeProvider.GetElapsedTime(startTime);
-
-            _metrics.RecordQueryExecution(GetQueryName(sql), elapsed, results.Count);
-            return results;
-        });
-    }
-
-    /// <summary>
-    /// Executes a parameterized query asynchronously using a duplicated connection (MVCC).
-    /// Runs on thread pool to not block the grain scheduler.
-    /// </summary>
-    public Task<List<Dictionary<string, object?>>> QueryAsync(string sql, params object[] parameters)
-    {
-        ThrowIfDisposed();
-        return Task.Run(() =>
-        {
-            using var readConn = CreateReadConnection();
-            using var command = readConn.CreateCommand();
-            command.CommandText = sql;
-            _queryExecutor.AddParameters(command, parameters);
-
-            var startTime = _timeProvider.GetTimestamp();
-            var results = _queryExecutor.ExecuteQuery(command);
-            var elapsed = _timeProvider.GetElapsedTime(startTime);
-
-            _metrics.RecordQueryExecution(GetQueryName(sql), elapsed, results.Count);
-            return results;
-        });
-    }
-
-    /// <summary>
-    /// Executes a query and returns JSON asynchronously using a duplicated connection (MVCC).
-    /// Runs on thread pool to not block the grain scheduler.
-    /// </summary>
-    public Task<string> QueryJsonAsync(string sql)
-    {
-        ThrowIfDisposed();
-        return Task.Run(() =>
-        {
-            using var readConn = CreateReadConnection();
-            using var command = readConn.CreateCommand();
-            command.CommandText = sql;
-
-            var startTime = _timeProvider.GetTimestamp();
-            var json = _queryExecutor.ExecuteQueryToJson(command, out var rowCount);
-            var elapsed = _timeProvider.GetElapsedTime(startTime);
-
-            _metrics.RecordQueryExecution(GetQueryName(sql), elapsed, rowCount);
-            return json;
-        });
-    }
-
-    /// <summary>
-    /// Executes a parameterized query and returns JSON asynchronously using a duplicated connection (MVCC).
-    /// Runs on thread pool to not block the grain scheduler.
-    /// </summary>
-    public Task<string> QueryJsonAsync(string sql, params object[] parameters)
-    {
-        ThrowIfDisposed();
-        return Task.Run(() =>
-        {
-            using var readConn = CreateReadConnection();
-            using var command = readConn.CreateCommand();
-            command.CommandText = sql;
-            _queryExecutor.AddParameters(command, parameters);
-
-            var startTime = _timeProvider.GetTimestamp();
-            var json = _queryExecutor.ExecuteQueryToJson(command, out var rowCount);
-            var elapsed = _timeProvider.GetElapsedTime(startTime);
-
-            _metrics.RecordQueryExecution(GetQueryName(sql), elapsed, rowCount);
-            return json;
-        });
-    }
-
-    #endregion
 
     /// <inheritdoc />
     public void ApplyRetention(string tableName, string timestampColumn, TimeSpan retention)
