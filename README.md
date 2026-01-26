@@ -74,13 +74,15 @@ Silos (Metrics Collection)
 InsightsGrain (Singleton)
     │ ├── Channel-based buffer (non-blocking ingestion)
     │ ├── DuckDB (time-series storage with MVCC)
-    │ ├── In-memory aggregations
-    │ └── Change detection
+    │ ├── Three-tier background refresh (fast/slow/broadcast)
+    │ └── Change detection with observer notifications
     ▼
-DashboardBroadcastGrain (StatelessWorker)
-    │
+DashboardBroadcastGrain (per-silo singleton)
+    │ ├── Orleans IGrainObserver pattern
+    │ ├── ObserverManager for subscription tracking
+    │ └── Circuit breaker for fault tolerance
     ▼
-SignalR Hub
+SignalR Hub ←→ IDashboardObserver
     │
     ▼
 Blazor WASM Dashboard
@@ -101,6 +103,21 @@ DuckDB connections are duplicated via `Duplicate()` for read operations, enablin
 
 ### Bounded Memory Growth
 In-memory aggregations use LRU eviction with configurable limits (`MaxMetricsEntries`). This prevents unbounded memory growth in long-running silos with many grain types.
+
+### Three-Tier Background Processing
+Dashboard data is pre-built by background refresh loops using `PeriodicTimer` for precise timing:
+- **Fast refresh** (1s): Overview and Orleans pages run in parallel on thread pool
+- **Slow refresh** (5s): Insights page with trend analysis
+- **Broadcast timer** (grain timer): O(1) volatile reads from pre-built cache, pushes only on data change
+
+This architecture ensures the grain scheduler is never blocked by expensive DuckDB queries.
+
+### Observer Pattern with Circuit Breaker
+Real-time updates use Orleans `IGrainObserver` for push-based notifications:
+- `ObserverManager` tracks subscriptions with automatic expiration
+- `ObserverHealthTracker` implements circuit breaker for fault tolerance
+- Grace period buffering prevents message loss during transient disconnects
+- Cached delegates eliminate lambda allocations on every broadcast
 
 ## Projects
 
@@ -126,27 +143,31 @@ Server-side dashboard components. Install this on the host that serves the dashb
 
 **Key Components:**
 - **DashboardHub** - SignalR hub for real-time push updates to connected clients
-- **DashboardBroadcastGrain** - StatelessWorker that broadcasts page data to SignalR groups
+- **DashboardBroadcastGrain** - Per-silo singleton grain that broadcasts page data via Orleans observers
+- **DashboardObserver** - `IGrainObserver` implementation bridging Orleans notifications to SignalR
+- **ObserverHealthTracker** - Circuit breaker and health tracking for observer fault tolerance
 - **DashboardExtensions** - Extension methods for `IServiceCollection` and `IEndpointRouteBuilder` configuration
 
 **Responsibilities:**
 - Serves the Blazor WebAssembly client static files
-- Manages SignalR connections and group subscriptions (one group per dashboard page)
-- Routes page data from InsightsGrain to connected dashboard clients
+- Manages SignalR connections and observer subscriptions (one observer per connection)
+- Routes page data from InsightsGrain → DashboardBroadcastGrain → Observer → SignalR → Client
 
 ### Orleans.Insights.Dashboard.Client
 
 Blazor WebAssembly client application for the dashboard UI.
 
 **Key Components:**
-- **DashboardService** - SignalR client that subscribes to page-specific data streams
+- **DashboardSignalRService** - SignalR client with heartbeat to keep observer subscriptions alive
 - **Dashboard Pages:**
   - **Overview** - Cluster summary with silo status cards
   - **Orleans** - Grain type list with method profiling charts
   - **Insights** - Slowest/busiest grains, trend analysis
+  - **Settings** - Configuration and diagnostics
 
 **UI Features:**
-- Real-time updates via SignalR (no polling)
+- Real-time updates via SignalR push (no polling)
+- `PeriodicTimer`-based heartbeat to prevent observer expiration
 - Interactive charts using a lightweight charting library
 - Responsive grid layout for silo and grain cards
 
@@ -164,28 +185,72 @@ Sample application demonstrating Orleans.Insights integration.
 - **Overview** - High-level cluster summary with silo status
 - **Orleans** - Detailed grain monitoring with method profiling
 - **Insights** - Trend analysis and anomaly detection
+- **Settings** - Configuration and diagnostics
 
 ## Configuration Options
 
 ```csharp
 public class InsightsOptions
 {
+    // === Data Retention ===
     // How long to retain historical data (default: 1 hour)
     public TimeSpan RetentionPeriod { get; set; }
 
-    // Dashboard update frequency (default: 1 second)
+    // === Dashboard Updates ===
+    // Fast broadcast interval for Overview/Orleans pages (default: 1 second)
     public TimeSpan BroadcastInterval { get; set; }
 
-    // Batch flush threshold for DuckDB writes (default: 1000)
+    // Slow broadcast interval for Insights page (default: 5 seconds)
+    public TimeSpan SlowBroadcastInterval { get; set; }
+
+    // Cache TTL for page data to reduce repeated queries (default: 500ms)
+    public TimeSpan PageCacheTtl { get; set; }
+
+    // === DuckDB Buffering ===
+    // Number of records to buffer before flushing to DuckDB (default: 1000)
     public int BatchFlushThreshold { get; set; }
+
+    // Maximum time to buffer records before flushing (default: 1 second)
+    public TimeSpan BatchFlushInterval { get; set; }
 
     // Capacity of the bounded channel for metrics buffering (default: 10,000)
     // When full, oldest items are dropped (backpressure handling)
     public int ChannelCapacity { get; set; }
 
+    // === Memory Management ===
     // Maximum grain types/methods to track before LRU eviction (default: 10,000)
     public int MaxMetricsEntries { get; set; }
 
+    // How often to check for LRU eviction (default: 1 minute)
+    public TimeSpan EvictionCheckInterval { get; set; }
+
+    // Maximum metrics samples per grain type for rolling windows (default: 100)
+    public int MetricsSampleLimit { get; set; }
+
+    // Maximum method profile samples for time-series charts (default: 120)
+    public int MethodProfileSampleLimit { get; set; }
+
+    // === Maintenance ===
+    // How often to run maintenance tasks (default: 1 minute)
+    public TimeSpan MaintenanceInterval { get; set; }
+
+    // How often to run vacuum/checkpoint operations (default: 30 minutes)
+    public TimeSpan VacuumInterval { get; set; }
+
+    // Database size threshold for warnings (default: 100 MB)
+    public long DatabaseSizeWarningBytes { get; set; }
+
+    // === Queries ===
+    // Default duration for queries when not specified (default: 30 minutes)
+    public TimeSpan DefaultQueryDuration { get; set; }
+
+    // Default bucket size for time-series aggregations (default: 60 seconds)
+    public int DefaultBucketSeconds { get; set; }
+
+    // Maximum rows to return from custom queries (default: 10,000)
+    public int MaxQueryResults { get; set; }
+
+    // === Security ===
     // Require authentication for dashboard (default: false)
     public bool RequireAuthentication { get; set; }
 }
