@@ -126,9 +126,10 @@ internal sealed class InsightsSchemaManager
 
     private void CreateIndexes()
     {
-        // Cluster metrics indexes
+        // Cluster metrics indexes - composite for common query patterns
         _database.Execute("CREATE INDEX IF NOT EXISTS idx_cluster_ts ON cluster_metrics(timestamp)");
         _database.Execute("CREATE INDEX IF NOT EXISTS idx_cluster_silo ON cluster_metrics(silo_id)");
+        _database.Execute("CREATE INDEX IF NOT EXISTS idx_cluster_silo_ts ON cluster_metrics(silo_id, timestamp DESC)");
 
         // Grain metrics indexes
         _database.Execute("CREATE INDEX IF NOT EXISTS idx_grain_ts ON grain_metrics(timestamp)");
@@ -138,15 +139,22 @@ internal sealed class InsightsSchemaManager
         _database.Execute("CREATE INDEX IF NOT EXISTS idx_method_ts ON method_metrics(timestamp)");
         _database.Execute("CREATE INDEX IF NOT EXISTS idx_method_grain ON method_metrics(grain_type, method_name)");
 
-        // Method profile indexes (optimized for time-series queries and grain/method lookups)
+        // Method profile indexes - optimized for hot query patterns
+        // Composite index for timestamp-filtered aggregation queries (GetTopGrainTypes, GetTopMethods)
         _database.Execute("CREATE INDEX IF NOT EXISTS idx_method_profile_ts ON method_profile(timestamp)");
         _database.Execute("CREATE INDEX IF NOT EXISTS idx_method_profile_grain ON method_profile(grain_type, method_name)");
         _database.Execute("CREATE INDEX IF NOT EXISTS idx_method_profile_silo ON method_profile(silo_id)");
+        // Composite indexes for aggregation queries - covers timestamp filter + grouping columns
+        _database.Execute("CREATE INDEX IF NOT EXISTS idx_method_profile_ts_grain ON method_profile(timestamp, grain_type)");
+        _database.Execute("CREATE INDEX IF NOT EXISTS idx_method_profile_ts_grain_method ON method_profile(timestamp, grain_type, method_name)");
+        _database.Execute("CREATE INDEX IF NOT EXISTS idx_method_profile_ts_silo ON method_profile(timestamp, silo_id)");
 
-        // Grain type activation indexes (optimized for per-silo grain type queries)
+        // Grain type activation indexes - composite for per-silo grain type queries
         _database.Execute("CREATE INDEX IF NOT EXISTS idx_grain_type_activations_ts ON grain_type_activations(timestamp)");
         _database.Execute("CREATE INDEX IF NOT EXISTS idx_grain_type_activations_grain ON grain_type_activations(grain_type)");
         _database.Execute("CREATE INDEX IF NOT EXISTS idx_grain_type_activations_silo ON grain_type_activations(silo_id)");
+        // Composite index for the common query pattern: filter by timestamp, group by grain_type/silo_id
+        _database.Execute("CREATE INDEX IF NOT EXISTS idx_grain_type_activations_ts_grain_silo ON grain_type_activations(timestamp, grain_type, silo_id)");
     }
 
     /// <summary>

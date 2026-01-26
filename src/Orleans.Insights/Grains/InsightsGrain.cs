@@ -281,16 +281,8 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
         var cutoff = DateTime.UtcNow - (duration ?? Settings.DefaultQueryDuration);
         var windowSeconds = (duration ?? Settings.DefaultQueryDuration).TotalSeconds;
 
-        // Map metric to ORDER BY clause for method_profile table
-        var orderBy = metric switch
-        {
-            InsightMetric.Latency => "avg_latency DESC",
-            InsightMetric.Requests => "total_requests DESC",
-            InsightMetric.Errors => "failed_requests DESC",
-            InsightMetric.Throughput => "rps DESC",
-            InsightMetric.ErrorRate => "error_rate DESC",
-            _ => "avg_latency DESC"
-        };
+        // Use FrozenDictionary for O(1) lookup (defined at class level)
+        var orderBy = OrderByMapping.GetValueOrDefault(metric, "avg_latency DESC");
 
         // Query from method_profile table (populated by GrainMethodProfiler) instead of grain_metrics
         // This is where actual grain call data is stored
@@ -344,16 +336,8 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
         var cutoff = DateTime.UtcNow - (duration ?? Settings.DefaultQueryDuration);
         var windowSeconds = (duration ?? Settings.DefaultQueryDuration).TotalSeconds;
 
-        // Map metric to ORDER BY clause for method_profile table
-        var orderBy = metric switch
-        {
-            InsightMetric.Latency => "avg_latency DESC",
-            InsightMetric.Requests => "total_requests DESC",
-            InsightMetric.Errors => "failed_requests DESC",
-            InsightMetric.Throughput => "rps DESC",
-            InsightMetric.ErrorRate => "error_rate DESC",
-            _ => "avg_latency DESC"
-        };
+        // Use FrozenDictionary for O(1) lookup (defined at class level)
+        var orderBy = OrderByMapping.GetValueOrDefault(metric, "avg_latency DESC");
 
         // Query from method_profile table (populated by GrainMethodProfiler) instead of method_metrics
         // Uses NULLIF for division-by-zero handling and HAVING to filter empty methods
@@ -914,13 +898,8 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
             var activationGrainType = InsightsQueryHelper.GetString(row, "grain_type");
             var totalActivations = InsightsQueryHelper.GetLong(row, "total_activations");
 
-            // Strip assembly suffix to get just "Namespace.TypeName"
-            var normalizedType = activationGrainType;
-            var commaIndex = activationGrainType.LastIndexOf(',');
-            if (commaIndex > 0)
-            {
-                normalizedType = activationGrainType[..commaIndex];
-            }
+            // Strip assembly suffix to get just "Namespace.TypeName" (cached for performance)
+            var normalizedType = InsightsQueryHelper.NormalizeGrainTypeName(activationGrainType);
 
             if (dict.TryGetValue(normalizedType, out var existing))
             {
@@ -1180,13 +1159,8 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
             var siloId = InsightsQueryHelper.GetString(row, "silo_id");
             var activations = (int)InsightsQueryHelper.GetLong(row, "activations");
 
-            // Strip assembly suffix to get just "Namespace.TypeName"
-            var normalizedType = activationGrainType;
-            var commaIndex = activationGrainType.LastIndexOf(',');
-            if (commaIndex > 0)
-            {
-                normalizedType = activationGrainType[..commaIndex];
-            }
+            // Strip assembly suffix to get just "Namespace.TypeName" (cached for performance)
+            var normalizedType = InsightsQueryHelper.NormalizeGrainTypeName(activationGrainType);
 
             if (!perSiloStats.TryGetValue(normalizedType, out var siloDict))
             {
@@ -1946,6 +1920,32 @@ internal static class InsightsQueryHelper
     /// Pre-allocated size suffixes to avoid per-call allocations.
     /// </summary>
     private static readonly string[] SizeSuffixes = ["B", "KB", "MB", "GB"];
+
+    /// <summary>
+    /// Cache for normalized grain type names (assembly suffix stripped).
+    /// Key: full grain type "Namespace.TypeName,AssemblyName"
+    /// Value: normalized type "Namespace.TypeName"
+    /// Thread-safe via ConcurrentDictionary.
+    /// </summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> GrainTypeNameCache = new();
+
+    /// <summary>
+    /// Normalizes a grain type name by stripping the assembly suffix.
+    /// Uses a cache to avoid repeated string operations.
+    /// Input: "Namespace.TypeName,AssemblyName" -> Output: "Namespace.TypeName"
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static string NormalizeGrainTypeName(string grainType)
+    {
+        if (string.IsNullOrEmpty(grainType))
+            return grainType;
+
+        return GrainTypeNameCache.GetOrAdd(grainType, static gt =>
+        {
+            var commaIndex = gt.LastIndexOf(',');
+            return commaIndex > 0 ? gt[..commaIndex] : gt;
+        });
+    }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static DateTime GetDateTime(Dictionary<string, object?> row, string column)

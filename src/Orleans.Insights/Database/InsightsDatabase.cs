@@ -1,5 +1,6 @@
 using DuckDB.NET.Data;
 using Microsoft.Extensions.Logging;
+using System.Collections.Concurrent;
 using System.Diagnostics.Metrics;
 
 namespace Orleans.Insights.Database;
@@ -43,6 +44,8 @@ public sealed class InsightsDatabase : IInsightsDatabase
     private readonly IDuckDbMetadataProvider _metadataProvider;
     private readonly TimeProvider _timeProvider;
     private readonly string _databaseId;
+    private readonly ConcurrentBag<DuckDBConnection> _readConnectionPool = new();
+    private const int MaxPooledConnections = 4;
     private bool _disposed;
 
     /// <summary>
@@ -126,21 +129,44 @@ public sealed class InsightsDatabase : IInsightsDatabase
     }
 
     /// <summary>
-    /// Creates a new read connection via <see cref="DuckDBConnection.Duplicate"/>.
+    /// Gets a read connection from the pool or creates a new one via <see cref="DuckDBConnection.Duplicate"/>.
     /// This enables MVCC - reads can proceed concurrently with writes.
     /// </summary>
     /// <remarks>
-    /// The caller is responsible for disposing the returned connection.
-    /// For best performance, consider pooling connections or using a single
-    /// read connection per query batch.
+    /// The caller should return the connection via <see cref="ReturnReadConnection"/> when done.
+    /// If not returned, the connection will still work but won't be reused.
     /// </remarks>
-    /// <returns>A new connection sharing the same in-memory database.</returns>
+    /// <returns>A connection sharing the same in-memory database.</returns>
     public DuckDBConnection CreateReadConnection()
     {
         ThrowIfDisposed();
+
+        // Try to get a pooled connection first
+        if (_readConnectionPool.TryTake(out var pooledConn))
+        {
+            return pooledConn;
+        }
+
+        // Create a new connection
         var conn = _connection.Duplicate();
         conn.Open();
         return conn;
+    }
+
+    /// <summary>
+    /// Returns a read connection to the pool for reuse.
+    /// If the pool is full, the connection is disposed.
+    /// </summary>
+    /// <param name="connection">The connection to return.</param>
+    public void ReturnReadConnection(DuckDBConnection connection)
+    {
+        if (_disposed || _readConnectionPool.Count >= MaxPooledConnections)
+        {
+            connection.Dispose();
+            return;
+        }
+
+        _readConnectionPool.Add(connection);
     }
 
     /// <inheritdoc />
@@ -432,6 +458,20 @@ public sealed class InsightsDatabase : IInsightsDatabase
     {
         if (_disposed) return;
         _disposed = true;
+
+        // Dispose all pooled read connections
+        while (_readConnectionPool.TryTake(out var pooledConn))
+        {
+            try
+            {
+                pooledConn.Close();
+                pooledConn.Dispose();
+            }
+            catch
+            {
+                // Ignore errors during disposal
+            }
+        }
 
         try
         {

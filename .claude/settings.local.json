@@ -25,7 +25,9 @@
       "Bash(dotnet run:*)",
       "Bash(Select-Object -First 5)",
       "Bash(findstr:*)",
-      "Bash(dotnet test:*)"
+      "Bash(dotnet test:*)",
+      "mcp__Context7__resolve-library-id",
+      "mcp__Context7__get-library-docs"
     ]
   }
 }

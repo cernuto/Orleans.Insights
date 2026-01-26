@@ -313,11 +313,17 @@ internal sealed class InsightsMetricsBuffer : IAsyncDisposable
 
     private static PartitionedRecords PartitionRecords(List<MetricRecord> batch)
     {
-        var cluster = new List<ClusterMetricRecord>();
-        var grain = new List<GrainMetricRecord>();
-        var grainTypeActivation = new List<GrainTypeActivationRecord>();
-        var method = new List<MethodMetricRecord>();
-        var methodProfile = new List<MethodProfileRecord>();
+        var count = batch.Count;
+        // Pre-allocate based on typical distribution:
+        // - MethodProfile records dominate (typically 60-70% of batch)
+        // - Grain/GrainTypeActivation records are next (15-20% each)
+        // - Cluster metrics are rare (1 per silo per report)
+        // - Method metrics (legacy) are similar to grain metrics
+        var cluster = new List<ClusterMetricRecord>(Math.Max(4, count / 100));
+        var grain = new List<GrainMetricRecord>(count / 5);
+        var grainTypeActivation = new List<GrainTypeActivationRecord>(count / 5);
+        var method = new List<MethodMetricRecord>(count / 5);
+        var methodProfile = new List<MethodProfileRecord>(count * 2 / 3);
 
         foreach (var record in batch)
         {

@@ -183,11 +183,15 @@ public partial class InsightsGrain
         if (last.Silos.Count != current.Silos.Count)
             return true;
 
+        // Build lookup for O(1) access (avoids LINQ FirstOrDefault allocation per iteration)
+        var lastSilosLookup = new Dictionary<string, SiloSummary>(last.Silos.Count);
+        foreach (var silo in last.Silos)
+            lastSilosLookup[silo.Address] = silo;
+
         // Check silo changes
         foreach (var currentSilo in current.Silos)
         {
-            var lastSilo = last.Silos.FirstOrDefault(s => s.Address == currentSilo.Address);
-            if (lastSilo is null)
+            if (!lastSilosLookup.TryGetValue(currentSilo.Address, out var lastSilo))
                 return true;
 
             if (lastSilo.Status != currentSilo.Status
@@ -227,11 +231,15 @@ public partial class InsightsGrain
             || last.TopMethods.Count != current.TopMethods.Count)
             return true;
 
+        // Build lookup for O(1) access (avoids LINQ FirstOrDefault allocation per iteration)
+        var lastSilosLookup = new Dictionary<string, SiloSummary>(last.Silos.Count);
+        foreach (var silo in last.Silos)
+            lastSilosLookup[silo.Address] = silo;
+
         // Check silo-level changes
         foreach (var currentSilo in current.Silos)
         {
-            var lastSilo = last.Silos.FirstOrDefault(s => s.Address == currentSilo.Address);
-            if (lastSilo is null)
+            if (!lastSilosLookup.TryGetValue(currentSilo.Address, out var lastSilo))
                 return true;
 
             if (lastSilo.Status != currentSilo.Status
