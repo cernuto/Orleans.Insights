@@ -42,6 +42,11 @@ public sealed class DashboardBroadcastGrain : Grain, IDashboardBroadcastGrain
     private IDisposable? _refreshTimer;
     private bool _gracePeriodEnabled;
 
+    // Cached delegates to avoid lambda allocations on every broadcast
+    private Func<IDashboardObserver, OverviewPageData, Task>? _overviewDispatcher;
+    private Func<IDashboardObserver, OrleansPageData, Task>? _orleansDispatcher;
+    private Func<IDashboardObserver, InsightsPageData, Task>? _insightsDispatcher;
+
     public DashboardBroadcastGrain(
         ILogger<DashboardBroadcastGrain> logger,
         IOptions<DashboardObserverOptions> options)
@@ -74,6 +79,11 @@ public sealed class DashboardBroadcastGrain : Grain, IDashboardBroadcastGrain
             _options.MaxBufferedMessagesPerObserver);
 
         _gracePeriodEnabled = _options.ObserverGracePeriod > TimeSpan.Zero;
+
+        // Initialize cached delegates (allocated once, reused for all dispatches)
+        _overviewDispatcher = static (observer, data) => observer.OnOverviewData(data);
+        _orleansDispatcher = static (observer, data) => observer.OnOrleansData(data);
+        _insightsDispatcher = static (observer, data) => observer.OnInsightsData(data);
 
         // Start refresh timer for observer maintenance
         if (_options.ObserverRefreshInterval > TimeSpan.Zero)
@@ -201,29 +211,30 @@ public sealed class DashboardBroadcastGrain : Grain, IDashboardBroadcastGrain
     /// <inheritdoc/>
     public Task BroadcastOverviewData(OverviewPageData data)
     {
-        DispatchToObservers(DashboardPages.Overview, observer => observer.OnOverviewData(data), data);
+        DispatchToObservers(DashboardPages.Overview, _overviewDispatcher!, data);
         return Task.CompletedTask;
     }
 
     /// <inheritdoc/>
     public Task BroadcastOrleansData(OrleansPageData data)
     {
-        DispatchToObservers(DashboardPages.Orleans, observer => observer.OnOrleansData(data), data);
+        DispatchToObservers(DashboardPages.Orleans, _orleansDispatcher!, data);
         return Task.CompletedTask;
     }
 
     /// <inheritdoc/>
     public Task BroadcastInsightsData(InsightsPageData data)
     {
-        DispatchToObservers(DashboardPages.Insights, observer => observer.OnInsightsData(data), data);
+        DispatchToObservers(DashboardPages.Insights, _insightsDispatcher!, data);
         return Task.CompletedTask;
     }
 
     /// <summary>
     /// Dispatches data to all observers subscribed to a specific page.
     /// Respects circuit breaker state and buffers messages during grace period.
+    /// Uses cached delegates to avoid lambda allocations per broadcast.
     /// </summary>
-    private void DispatchToObservers(string page, Func<IDashboardObserver, Task> dispatch, object data)
+    private void DispatchToObservers<T>(string page, Func<IDashboardObserver, T, Task> dispatch, T data)
     {
         var dispatchCount = 0;
 
@@ -244,7 +255,7 @@ public sealed class DashboardBroadcastGrain : Grain, IDashboardBroadcastGrain
                     // Try to buffer if in grace period
                     if (_healthTracker.IsInGracePeriod(connectionId))
                     {
-                        if (_healthTracker.BufferMessage(connectionId, data))
+                        if (_healthTracker.BufferMessage(connectionId, data!))
                         {
                             _logger.LogDebug("Buffered {Page} data for connection {ConnectionId} in grace period", page, connectionId);
                         }
@@ -253,8 +264,8 @@ public sealed class DashboardBroadcastGrain : Grain, IDashboardBroadcastGrain
                 }
             }
 
-            // Dispatch to observer
-            var pending = dispatch(observer);
+            // Dispatch to observer using cached delegate
+            var pending = dispatch(observer, data);
             _ = ObserveDispatchAsync(pending, connectionId, observer);
             dispatchCount++;
         }
