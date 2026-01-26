@@ -11,39 +11,90 @@ namespace Orleans.Insights.Grains;
 /// Partial class implementing dashboard page query methods.
 /// Supports horizontal scaling by providing centralized state access.
 /// </summary>
+/// <remarks>
+/// <para>
+/// This class provides two sets of methods for page data:
+/// </para>
+/// <para>
+/// 1. <b>GetXxxPageData()</b>: Public API methods called by dashboard clients.
+///    These return pre-built data from the volatile cache populated by background refresh loops.
+///    If cache is empty (startup), they fall back to building data directly.
+/// </para>
+/// <para>
+/// 2. <b>BuildXxxPageDataForCacheAsync()</b>: Internal methods called by background refresh loops.
+///    These execute DuckDB queries and build the page data objects.
+///    Run on thread pool to avoid blocking grain scheduler.
+/// </para>
+/// </remarks>
 public partial class InsightsGrain
 {
-    #region Dashboard Page Cache
-
-    /// <summary>
-    /// TTL for cached dashboard page data. Multiple callers within this window
-    /// receive the same cached result, reducing downstream grain calls.
-    /// </summary>
-    private static readonly TimeSpan PageCacheTtl = TimeSpan.FromMilliseconds(500);
-
-    private OverviewPageData? _cachedOverview;
-    private DateTime _overviewCacheTime;
-
-    private OrleansPageData? _cachedOrleans;
-    private DateTime _orleansCacheTime;
-
-    private InsightsPageData? _cachedInsights;
-    private DateTime _insightsCacheTime;
-
-    #endregion
-
     #region IDashboardPageQueryGrain Implementation
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// Returns pre-built data from volatile cache if available.
+    /// Falls back to building directly on cache miss (e.g., during startup).
+    /// </remarks>
     public async Task<OverviewPageData> GetOverviewPageData()
     {
-        var now = DateTime.UtcNow;
-
-        // Return cached data if still valid
-        if (_cachedOverview != null && now - _overviewCacheTime < PageCacheTtl)
+        // Return pre-built data from cache if available (populated by FastRefreshLoop)
+        var cached = _refreshedOverview;
+        if (cached != null)
         {
-            return _cachedOverview;
+            return cached;
         }
+
+        // Fallback: build directly (startup or cache miss)
+        return await BuildOverviewPageDataForCacheAsync();
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Returns pre-built data from volatile cache if available.
+    /// Falls back to building directly on cache miss (e.g., during startup).
+    /// </remarks>
+    public async Task<OrleansPageData> GetOrleansPageData()
+    {
+        // Return pre-built data from cache if available (populated by FastRefreshLoop)
+        var cached = _refreshedOrleans;
+        if (cached != null)
+        {
+            return cached;
+        }
+
+        // Fallback: build directly (startup or cache miss)
+        return await BuildOrleansPageDataForCacheAsync();
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Returns pre-built data from volatile cache if available.
+    /// Falls back to building directly on cache miss (e.g., during startup).
+    /// </remarks>
+    public async Task<InsightsPageData> GetInsightsPageData()
+    {
+        // Return pre-built data from cache if available (populated by SlowRefreshLoop)
+        var cached = _refreshedInsights;
+        if (cached != null)
+        {
+            return cached;
+        }
+
+        // Fallback: build directly (startup or cache miss)
+        return await BuildInsightsPageDataForCacheAsync();
+    }
+
+    #endregion
+
+    #region Background Cache Build Methods
+
+    /// <summary>
+    /// Builds overview page data for the background refresh loop cache.
+    /// Called by FastRefreshLoop on thread pool.
+    /// </summary>
+    private async Task<OverviewPageData> BuildOverviewPageDataForCacheAsync()
+    {
+        var now = DateTime.UtcNow;
 
         // Get aggregated cluster metrics
         var aggregated = await GetAggregatedMetrics();
@@ -60,7 +111,7 @@ public partial class InsightsGrain
             MemoryUsageMb = aggregated.ClusterMetrics.TotalMemoryUsageMb / Math.Max(1, siloInfos.Length)
         }).ToList();
 
-        _cachedOverview = new OverviewPageData
+        return new OverviewPageData
         {
             SiloCount = siloInfos.Length,
             TotalGrains = (int)aggregated.ClusterMetrics.TotalActivations,
@@ -69,20 +120,15 @@ public partial class InsightsGrain
             Timestamp = now,
             Silos = silos
         };
-        _overviewCacheTime = now;
-        return _cachedOverview;
     }
 
-    /// <inheritdoc/>
-    public async Task<OrleansPageData> GetOrleansPageData()
+    /// <summary>
+    /// Builds Orleans page data for the background refresh loop cache.
+    /// Called by FastRefreshLoop on thread pool.
+    /// </summary>
+    private async Task<OrleansPageData> BuildOrleansPageDataForCacheAsync()
     {
         var now = DateTime.UtcNow;
-
-        // Return cached data if still valid
-        if (_cachedOrleans != null && now - _orleansCacheTime < PageCacheTtl)
-        {
-            return _cachedOrleans;
-        }
 
         // Get aggregated metrics
         var aggregated = await GetAggregatedMetrics();
@@ -130,7 +176,7 @@ public partial class InsightsGrain
             })
             .ToList();
 
-        _cachedOrleans = new OrleansPageData
+        return new OrleansPageData
         {
             Silos = silos,
             GrainStats = grainStats,
@@ -161,21 +207,15 @@ public partial class InsightsGrain
             },
             Timestamp = now
         };
-        _orleansCacheTime = now;
-        return _cachedOrleans;
     }
 
-    /// <inheritdoc/>
-    public async Task<InsightsPageData> GetInsightsPageData()
+    /// <summary>
+    /// Builds insights page data for the background refresh loop cache.
+    /// Called by SlowRefreshLoop on thread pool.
+    /// </summary>
+    private async Task<InsightsPageData> BuildInsightsPageDataForCacheAsync()
     {
         var now = DateTime.UtcNow;
-
-        // Return cached data if still valid
-        if (_cachedInsights != null && now - _insightsCacheTime < PageCacheTtl)
-        {
-            return _cachedInsights;
-        }
-
         var analysisDuration = TimeSpan.FromHours(1);
 
         // Parallel fetch all analytics data
@@ -195,7 +235,7 @@ public partial class InsightsGrain
 
         var anomalyReport = await anomalyTask;
 
-        _cachedInsights = new InsightsPageData
+        return new InsightsPageData
         {
             ClusterTrend = await clusterTrendTask,
             TopGrainsByLatency = await topGrainsByLatencyTask,
@@ -208,8 +248,6 @@ public partial class InsightsGrain
             DatabaseSummary = await dbSummaryTask,
             Timestamp = now
         };
-        _insightsCacheTime = now;
-        return _cachedInsights;
     }
 
     #endregion

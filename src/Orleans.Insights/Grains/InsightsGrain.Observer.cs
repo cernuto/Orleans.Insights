@@ -12,6 +12,27 @@ namespace Orleans.Insights.Grains;
 /// Calls IDashboardBroadcastGrain (a StatelessWorker in the dashboard host) to push updates via SignalR.
 /// Uses [OneWay] calls for fire-and-forget semantics - no need to await SignalR delivery.
 /// </summary>
+/// <remarks>
+/// <para>
+/// This implements a three-tier background processing architecture:
+/// </para>
+/// <para>
+/// 1. <b>Fast Refresh Loop</b> (Thread Pool, 1s): Builds Overview and Orleans page data.
+///    Runs on thread pool via Task.Run() to avoid blocking grain scheduler.
+/// </para>
+/// <para>
+/// 2. <b>Slow Refresh Loop</b> (Thread Pool, 5s): Builds Insights page data.
+///    Runs on thread pool for heavier analytical queries.
+/// </para>
+/// <para>
+/// 3. <b>Broadcast Timer</b> (Grain Timer, 1s): Reads from pre-built volatile cache
+///    and broadcasts via SignalR only when data has changed. O(1) instant reads.
+/// </para>
+/// <para>
+/// This design prevents grain scheduler starvation and ensures predictable broadcast timing
+/// regardless of query duration.
+/// </para>
+/// </remarks>
 public partial class InsightsGrain
 {
     #region Broadcaster
@@ -78,37 +99,39 @@ public partial class InsightsGrain
 
     /// <summary>
     /// Periodic callback that checks for data changes and broadcasts via SignalR.
+    /// Reads from pre-built volatile cache populated by background refresh loops.
     /// Only sends broadcasts when data has actually changed.
     /// [OneWay] methods return immediately - no need to await.
     /// </summary>
-    private async Task BroadcastChangesAsync()
+    /// <remarks>
+    /// This method performs O(1) volatile reads from the pre-built cache.
+    /// Heavy DuckDB queries are done in the background refresh loops, not here.
+    /// This ensures the broadcast timer runs in constant time regardless of data size.
+    /// </remarks>
+    private Task BroadcastChangesAsync()
     {
         if (_broadcastGrain == null)
-            return;
+            return Task.CompletedTask;
 
         try
         {
-            // Get current page data (uses caching internally)
-            var overviewTask = GetOverviewPageData();
-            var orleansTask = GetOrleansPageData();
-
-            await Task.WhenAll(overviewTask, orleansTask);
-
-            var overview = await overviewTask;
-            var orleans = await orleansTask;
+            // Read pre-built page data from cache (populated by background refresh loops)
+            // These are volatile reads - O(1), instant, no blocking
+            var overview = _refreshedOverview;
+            var orleans = _refreshedOrleans;
 
             // Broadcast only if data changed
-            // [OneWay] calls are fire-and-forget - use discard to suppress warnings
-            if (HasOverviewDataChanged(overview))
+            // [OneWay] calls are fire-and-forget - no need to await
+            if (overview != null && HasOverviewDataChanged(overview))
             {
                 _lastBroadcastOverview = overview;
-                _ = _broadcastGrain.BroadcastOverviewData(overview);
+                _broadcastGrain.BroadcastOverviewData(overview);
             }
 
-            if (HasOrleansDataChanged(orleans))
+            if (orleans != null && HasOrleansDataChanged(orleans))
             {
                 _lastBroadcastOrleans = orleans;
-                _ = _broadcastGrain.BroadcastOrleansData(orleans);
+                _broadcastGrain.BroadcastOrleansData(orleans);
             }
 
             // Less frequent pages - check every 5 seconds using counter for consistent timing
@@ -116,12 +139,14 @@ public partial class InsightsGrain
             if (_slowBroadcastCounter >= SlowBroadcastInterval)
             {
                 _slowBroadcastCounter = 0;
-                var insights = await GetInsightsPageData();
 
-                if (HasInsightsDataChanged(insights))
+                // Read pre-built insights data from cache
+                var insights = _refreshedInsights;
+
+                if (insights != null && HasInsightsDataChanged(insights))
                 {
                     _lastBroadcastInsights = insights;
-                    _ = _broadcastGrain.BroadcastInsightsData(insights);
+                    _broadcastGrain.BroadcastInsightsData(insights);
                 }
             }
         }
@@ -129,6 +154,8 @@ public partial class InsightsGrain
         {
             _logger.LogWarning(ex, "Failed to broadcast dashboard data");
         }
+
+        return Task.CompletedTask;
     }
 
     #endregion

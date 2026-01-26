@@ -72,6 +72,35 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
     private IDisposable? _maintenanceTimer;
     private bool _disposed;
 
+    #region Background Refresh Loop Fields
+
+    /// <summary>
+    /// Cancellation token source for background refresh loops.
+    /// </summary>
+    private CancellationTokenSource? _refreshCts;
+
+    /// <summary>
+    /// Fast refresh loop task (1 second interval).
+    /// Runs on thread pool to avoid blocking grain scheduler.
+    /// </summary>
+    private Task? _fastRefreshTask;
+
+    /// <summary>
+    /// Slow refresh loop task (5 second interval).
+    /// Runs on thread pool to avoid blocking grain scheduler.
+    /// </summary>
+    private Task? _slowRefreshTask;
+
+    /// <summary>
+    /// Pre-built page data populated by background refresh loops.
+    /// Volatile fields for thread-safe reads from broadcast timer.
+    /// </summary>
+    private volatile OverviewPageData? _refreshedOverview;
+    private volatile OrleansPageData? _refreshedOrleans;
+    private volatile InsightsPageData? _refreshedInsights;
+
+    #endregion
+
     public InsightsGrain(
         ILogger<InsightsGrain> logger,
         IOptions<InsightsOptions> settings)
@@ -110,7 +139,12 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
                 KeepAlive = false
             });
 
+        // Start background refresh loops (run on thread pool, outside grain scheduler)
+        // These loops pre-build page data so the broadcast timer can read with O(1) volatile reads
+        StartRefreshLoops();
+
         // Start broadcast timer for real-time dashboard updates via SignalR
+        // This timer reads from pre-built cache populated by refresh loops
         StartBroadcastTimer();
 
         return base.OnActivateAsync(cancellationToken);
@@ -119,6 +153,9 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
     public override async Task OnDeactivateAsync(DeactivationReason reason, CancellationToken cancellationToken)
     {
         _logger.LogInformation("InsightsGrain deactivating: {Reason}", reason);
+
+        // Stop background refresh loops first
+        await StopRefreshLoopsAsync();
 
         // Dispose buffer to flush any remaining data
         if (_buffer != null)
@@ -1684,6 +1721,151 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
 
     #endregion
 
+    #region Background Refresh Loops
+
+    /// <summary>
+    /// Starts the background refresh loops on the thread pool.
+    /// These loops build page data independently of the grain scheduler,
+    /// allowing the broadcast timer to read pre-built data with O(1) volatile reads.
+    /// </summary>
+    private void StartRefreshLoops()
+    {
+        _refreshCts = new CancellationTokenSource();
+
+        // Start background refresh loops (run on thread pool, outside grain scheduler)
+        // Using CancellationToken.None for Task.Run since loops are controlled by _refreshCts
+        _fastRefreshTask = Task.Run(() => FastRefreshLoopAsync(_refreshCts.Token), CancellationToken.None);
+        _slowRefreshTask = Task.Run(() => SlowRefreshLoopAsync(_refreshCts.Token), CancellationToken.None);
+
+        _logger.LogDebug("Background refresh loops started");
+    }
+
+    /// <summary>
+    /// Stops the background refresh loops and waits for them to complete.
+    /// </summary>
+    private async Task StopRefreshLoopsAsync()
+    {
+        if (_refreshCts == null)
+            return;
+
+        _logger.LogDebug("Stopping background refresh loops");
+
+        try
+        {
+            _refreshCts.Cancel();
+
+            // Wait for both loops to complete with timeout
+            var tasks = new List<Task>();
+            if (_fastRefreshTask != null) tasks.Add(_fastRefreshTask);
+            if (_slowRefreshTask != null) tasks.Add(_slowRefreshTask);
+
+            if (tasks.Count > 0)
+            {
+                await Task.WhenAll(tasks).WaitAsync(TimeSpan.FromSeconds(5));
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected during shutdown
+        }
+        catch (TimeoutException)
+        {
+            _logger.LogWarning("Timeout waiting for refresh loops to stop");
+        }
+        finally
+        {
+            _refreshCts.Dispose();
+            _refreshCts = null;
+            _fastRefreshTask = null;
+            _slowRefreshTask = null;
+        }
+
+        _logger.LogDebug("Background refresh loops stopped");
+    }
+
+    /// <summary>
+    /// Fast refresh loop running on thread pool (1 second interval).
+    /// Builds page data for frequently updated pages: Overview, Orleans.
+    /// </summary>
+    private async Task FastRefreshLoopAsync(CancellationToken ct)
+    {
+        _logger.LogDebug("Fast refresh loop started");
+
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                // Build all fast pages in parallel - DuckDB queries
+                var overviewTask = BuildOverviewPageDataForCacheAsync();
+                var orleansTask = BuildOrleansPageDataForCacheAsync();
+
+                await Task.WhenAll(overviewTask, orleansTask);
+
+                // Update page cache (volatile writes)
+                _refreshedOverview = await overviewTask;
+                _refreshedOrleans = await orleansTask;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Fast refresh loop iteration failed");
+            }
+
+            try
+            {
+                await Task.Delay(1000, ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                break;
+            }
+        }
+
+        _logger.LogDebug("Fast refresh loop stopped");
+    }
+
+    /// <summary>
+    /// Slow refresh loop running on thread pool (5 second interval).
+    /// Builds page data for less frequently updated pages: Insights.
+    /// </summary>
+    private async Task SlowRefreshLoopAsync(CancellationToken ct)
+    {
+        _logger.LogDebug("Slow refresh loop started");
+
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                // Build insights page data
+                _refreshedInsights = await BuildInsightsPageDataForCacheAsync();
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Slow refresh loop iteration failed");
+            }
+
+            try
+            {
+                await Task.Delay(5000, ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                break;
+            }
+        }
+
+        _logger.LogDebug("Slow refresh loop stopped");
+    }
+
+    #endregion
+
     #region Maintenance
 
     private async Task MaintenanceCallbackAsync()
@@ -1736,6 +1918,18 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
 
         _maintenanceTimer?.Dispose();
         _maintenanceTimer = null;
+
+        // Cancel refresh loops (synchronous cancel, loops will exit on their own)
+        try
+        {
+            _refreshCts?.Cancel();
+            _refreshCts?.Dispose();
+        }
+        catch
+        {
+            // Ignore errors during disposal
+        }
+        _refreshCts = null;
 
         // Dispose broadcast timer
         DisposeBroadcastTimer();
