@@ -1,7 +1,9 @@
 using Orleans.Insights.Database;
 using Orleans.Insights.Models;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.ObjectPool;
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
@@ -38,6 +40,9 @@ namespace Orleans.Insights.Schema;
 /// within the single-threaded consumer context. The batch list is local to the consumer
 /// and never escapes that context.
 /// </para>
+/// <para>
+/// <b>Optimization:</b> Uses ObjectPool for batch lists to reduce GC pressure.
+/// </para>
 /// </remarks>
 internal sealed class InsightsMetricsBuffer : IAsyncDisposable
 {
@@ -47,6 +52,7 @@ internal sealed class InsightsMetricsBuffer : IAsyncDisposable
     private readonly InsightsDatabase _database;
     private readonly CancellationTokenSource _cts;
     private readonly Task _consumerTask;
+    private readonly ObjectPool<List<MetricRecord>> _batchPool;
 
     private volatile bool _disposed;
     private long _totalWritten;
@@ -59,6 +65,11 @@ internal sealed class InsightsMetricsBuffer : IAsyncDisposable
         _settings = settings;
         _database = database;
         _cts = new CancellationTokenSource();
+
+        // Object pool for batch lists to avoid repeated allocations
+        _batchPool = new DefaultObjectPool<List<MetricRecord>>(
+            new BatchListPoolPolicy(settings.BatchFlushThreshold),
+            maximumRetained: 4);
 
         // Bounded channel with DropOldest provides backpressure without blocking producers
         // SingleReader=true enables lock-free optimizations in the channel
@@ -76,6 +87,20 @@ internal sealed class InsightsMetricsBuffer : IAsyncDisposable
             _cts.Token,
             TaskCreationOptions.LongRunning,
             TaskScheduler.Default).Unwrap();
+    }
+
+    /// <summary>
+    /// ObjectPool policy for batch lists - avoids repeated allocations.
+    /// </summary>
+    private sealed class BatchListPoolPolicy(int capacity) : PooledObjectPolicy<List<MetricRecord>>
+    {
+        public override List<MetricRecord> Create() => new(capacity);
+
+        public override bool Return(List<MetricRecord> obj)
+        {
+            obj.Clear();
+            return true;
+        }
     }
 
     /// <summary>
@@ -186,10 +211,12 @@ internal sealed class InsightsMetricsBuffer : IAsyncDisposable
     /// Persistent consumer loop that runs on a dedicated thread.
     /// Uses WaitToReadAsync for efficient signaling - the thread is released when idle
     /// and resumed when items arrive.
+    /// Uses ObjectPool to avoid repeated batch list allocations.
     /// </summary>
     private async Task ConsumerLoopAsync(CancellationToken cancellationToken)
     {
-        var batch = new List<MetricRecord>(_settings.BatchFlushThreshold);
+        // Get batch from pool - reused across iterations
+        var batch = _batchPool.Get();
 
         _logger.LogDebug("Metrics consumer started on dedicated thread");
 
@@ -240,6 +267,9 @@ internal sealed class InsightsMetricsBuffer : IAsyncDisposable
             {
                 FlushBatch(batch);
             }
+
+            // Return batch to pool
+            _batchPool.Return(batch);
 
             _logger.LogDebug("Metrics consumer stopped (flushed: {TotalFlushed}, dropped: {TotalDropped})",
                 TotalFlushed, TotalDropped);

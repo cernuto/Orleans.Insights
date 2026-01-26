@@ -81,12 +81,11 @@ public sealed class SiloMetricsCollector : ILifecycleParticipant<ISiloLifecycle>
         _isRunning = true;
 
         // Start timer to collect and send metrics every 5 seconds
-        // Using 5-second interval for silo metrics (less frequent than method profiling)
         _timer = new Timer(
             CollectAndSendMetrics,
             null,
-            TimeSpan.FromSeconds(5),  // Due time: 5 seconds
-            TimeSpan.FromSeconds(5)); // Period: 5 seconds
+            TimeSpan.FromSeconds(5),
+            TimeSpan.FromSeconds(5));
 
         return Task.CompletedTask;
     }

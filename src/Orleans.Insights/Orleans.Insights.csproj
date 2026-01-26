@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <PackageReference Include="DuckDB.NET.Data.Full" Version="1.4.3" />
+    <PackageReference Include="Microsoft.Extensions.ObjectPool" Version="10.0.2" />
     <PackageReference Include="Microsoft.Orleans.Sdk" Version="10.0.0" />
     <PackageReference Include="Microsoft.Orleans.Server" Version="10.0.0" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.2" />

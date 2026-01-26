@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.ObjectPool;
 using Orleans;
 using Orleans.Concurrency;
 using Orleans.Insights.Models;
@@ -29,6 +30,9 @@ namespace Orleans.Insights.Instrumentation;
 /// <item>Interlocked.Exchange provides atomic swap without blocking</item>
 /// <item>Single timer thread processes stats, no contention with grain calls</item>
 /// </list>
+/// <para>
+/// <b>Optimization:</b> Uses ObjectPool for report entries list to reduce GC pressure.
+/// </para>
 /// </remarks>
 public sealed class GrainMethodProfiler : IGrainMethodProfiler, ILifecycleParticipant<ISiloLifecycle>, IDisposable
 {
@@ -37,11 +41,28 @@ public sealed class GrainMethodProfiler : IGrainMethodProfiler, ILifecyclePartic
     private readonly string _hostName;
     private readonly string _siloAddress;
 
+    // Object pool for report entries list to avoid repeated allocations
+    private readonly ObjectPool<List<MethodProfileEntry>> _entriesPool;
+
     private ConcurrentDictionary<string, MethodTraceEntry> _traces = new();
     private Timer? _timer;
     private IInsightsGrain? _insightsGrain;
     private volatile bool _disposed;
     private volatile bool _isRunning;
+
+    /// <summary>
+    /// ObjectPool policy for method profile entries list.
+    /// </summary>
+    private sealed class EntriesListPoolPolicy : PooledObjectPolicy<List<MethodProfileEntry>>
+    {
+        public override List<MethodProfileEntry> Create() => new(64);
+
+        public override bool Return(List<MethodProfileEntry> obj)
+        {
+            obj.Clear();
+            return true;
+        }
+    }
 
     public GrainMethodProfiler(
         IGrainFactory grainFactory,
@@ -56,6 +77,11 @@ public sealed class GrainMethodProfiler : IGrainMethodProfiler, ILifecyclePartic
         _logger = logger;
         _hostName = Environment.MachineName;
         _siloAddress = localSiloDetails.SiloAddress.ToParsableString();
+
+        // Object pool for method profile entries to avoid repeated allocations
+        _entriesPool = new DefaultObjectPool<List<MethodProfileEntry>>(
+            new EntriesListPoolPolicy(),
+            maximumRetained: 4);
     }
 
     /// <summary>
@@ -125,12 +151,11 @@ public sealed class GrainMethodProfiler : IGrainMethodProfiler, ILifecyclePartic
         _isRunning = true;
 
         // Start timer to process and send stats every second (matches OrleansDashboard)
-        // Using 1000ms interval as OrleansDashboard does
         _timer = new Timer(
             ProcessStats,
             null,
-            1000,  // Due time: 1 second
-            1000); // Period: 1 second
+            1000,
+            1000);
 
         return Task.CompletedTask;
     }
@@ -147,6 +172,10 @@ public sealed class GrainMethodProfiler : IGrainMethodProfiler, ILifecyclePartic
         return Task.CompletedTask;
     }
 
+    /// <summary>
+    /// Timer callback that processes accumulated stats.
+    /// Uses ObjectPool for entries list to avoid repeated allocations.
+    /// </summary>
     private void ProcessStats(object? state)
     {
         if (_disposed || !_isRunning) return;
@@ -166,35 +195,43 @@ public sealed class GrainMethodProfiler : IGrainMethodProfiler, ILifecyclePartic
             // Use CollectionsMarshal for zero-copy iteration over dictionary values
             var entriesSpan = CollectionsMarshal.AsSpan(currentTraces.Values.ToList());
 
-            // Build the report entries with pre-allocated capacity
-            var reportEntries = new List<MethodProfileEntry>(entriesSpan.Length);
-            foreach (ref readonly var e in entriesSpan)
+            // Get report entries from pool - returned after report is built
+            var reportEntries = _entriesPool.Get();
+            try
             {
-                reportEntries.Add(new MethodProfileEntry
+                foreach (ref readonly var e in entriesSpan)
                 {
-                    GrainType = e.GrainType,
-                    Method = e.Method,
-                    Count = e.Count,
-                    TotalElapsedMs = e.ElapsedTime,
-                    ExceptionCount = e.ExceptionCount
-                });
+                    reportEntries.Add(new MethodProfileEntry
+                    {
+                        GrainType = e.GrainType,
+                        Method = e.Method,
+                        Count = e.Count,
+                        TotalElapsedMs = e.ElapsedTime,
+                        ExceptionCount = e.ExceptionCount
+                    });
+                }
+
+                // Build the report - must copy entries since we'll return list to pool
+                var report = new MethodProfileReport
+                {
+                    SiloId = _siloAddress,
+                    HostName = _hostName,
+                    Timestamp = DateTime.UtcNow,
+                    Entries = [.. reportEntries] // Copy to new list for serialization
+                };
+
+                // Get or cache the InsightsGrain reference
+                _insightsGrain ??= _grainFactory.GetGrain<IInsightsGrain>(IInsightsGrain.SingletonKey);
+
+                // Fire-and-forget send to aggregator (like OrleansDashboard's SubmitTracing)
+                // Using Immutable<T> wrapper for efficient serialization
+                _insightsGrain.IngestMethodProfile(report.AsImmutable()).Ignore();
             }
-
-            // Build the report
-            var report = new MethodProfileReport
+            finally
             {
-                SiloId = _siloAddress,
-                HostName = _hostName,
-                Timestamp = DateTime.UtcNow,
-                Entries = reportEntries
-            };
-
-            // Get or cache the InsightsGrain reference
-            _insightsGrain ??= _grainFactory.GetGrain<IInsightsGrain>(IInsightsGrain.SingletonKey);
-
-            // Fire-and-forget send to aggregator (like OrleansDashboard's SubmitTracing)
-            // Using Immutable<T> wrapper for efficient serialization
-            _insightsGrain.IngestMethodProfile(report.AsImmutable()).Ignore();
+                // Return entries to pool
+                _entriesPool.Return(reportEntries);
+            }
         }
         catch (Exception ex)
         {

@@ -30,8 +30,9 @@ public sealed class DashboardSignalRService : IDashboardDataService
     private readonly Lock _subscribedPagesLock = new();
     private readonly HashSet<string> _subscribedPages = new(StringComparer.OrdinalIgnoreCase);
 
-    // Heartbeat timer - keeps Orleans observer references alive (15s < Orleans 30s timeout)
-    private Timer? _heartbeatTimer;
+    // Heartbeat using PeriodicTimer for cleaner async pattern (no thread pool timer callbacks)
+    private PeriodicTimer? _heartbeatTimer;
+    private CancellationTokenSource? _heartbeatCts;
     private static readonly TimeSpan HeartbeatInterval = TimeSpan.FromSeconds(15);
 
     public DashboardSignalRService(
@@ -289,18 +290,45 @@ public sealed class DashboardSignalRService : IDashboardDataService
     private void StartHeartbeatTimer()
     {
         StopHeartbeatTimer();
-        _heartbeatTimer = new Timer(
-            _ => _ = HeartbeatAsync(),
-            null,
-            HeartbeatInterval,
-            HeartbeatInterval);
+        _heartbeatCts = new CancellationTokenSource();
+        _heartbeatTimer = new PeriodicTimer(HeartbeatInterval);
+
+        // Fire-and-forget the heartbeat loop - uses PeriodicTimer for clean async
+        _ = HeartbeatLoopAsync(_heartbeatCts.Token);
+
         _logger.LogDebug("Heartbeat started (interval: {Interval}s)", HeartbeatInterval.TotalSeconds);
     }
 
     private void StopHeartbeatTimer()
     {
+        _heartbeatCts?.Cancel();
+        _heartbeatCts?.Dispose();
+        _heartbeatCts = null;
+
         _heartbeatTimer?.Dispose();
         _heartbeatTimer = null;
+    }
+
+    /// <summary>
+    /// Heartbeat loop using PeriodicTimer for clean async pattern.
+    /// No timer callbacks on thread pool - just awaits the timer.
+    /// </summary>
+    private async Task HeartbeatLoopAsync(CancellationToken ct)
+    {
+        if (_heartbeatTimer is null)
+            return;
+
+        try
+        {
+            while (await _heartbeatTimer.WaitForNextTickAsync(ct))
+            {
+                await HeartbeatAsync();
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected during shutdown
+        }
     }
 
     private async Task HeartbeatAsync()

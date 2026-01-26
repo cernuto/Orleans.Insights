@@ -81,13 +81,13 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
 
     /// <summary>
     /// Fast refresh loop task (1 second interval).
-    /// Runs on thread pool to avoid blocking grain scheduler.
+    /// Runs on thread pool via Task.Run to avoid blocking grain scheduler.
     /// </summary>
     private Task? _fastRefreshTask;
 
     /// <summary>
     /// Slow refresh loop task (5 second interval).
-    /// Runs on thread pool to avoid blocking grain scheduler.
+    /// Runs on thread pool via Task.Run to avoid blocking grain scheduler.
     /// </summary>
     private Task? _slowRefreshTask;
 
@@ -1725,6 +1725,7 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
 
     /// <summary>
     /// Starts the background refresh loops on the thread pool.
+    /// Uses PeriodicTimer for precise timing with clean async pattern.
     /// These loops build page data independently of the grain scheduler,
     /// allowing the broadcast timer to read pre-built data with O(1) volatile reads.
     /// </summary>
@@ -1732,10 +1733,9 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
     {
         _refreshCts = new CancellationTokenSource();
 
-        // Start background refresh loops (run on thread pool, outside grain scheduler)
-        // Using CancellationToken.None for Task.Run since loops are controlled by _refreshCts
-        _fastRefreshTask = Task.Run(() => FastRefreshLoopAsync(_refreshCts.Token), CancellationToken.None);
-        _slowRefreshTask = Task.Run(() => SlowRefreshLoopAsync(_refreshCts.Token), CancellationToken.None);
+        // Start background refresh loops via Task.Run (thread pool)
+        _fastRefreshTask = Task.Run(() => FastRefreshLoopAsync(_refreshCts.Token));
+        _slowRefreshTask = Task.Run(() => SlowRefreshLoopAsync(_refreshCts.Token));
 
         _logger.LogDebug("Background refresh loops started");
     }
@@ -1752,10 +1752,10 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
 
         try
         {
-            _refreshCts.Cancel();
+            await _refreshCts.CancelAsync();
 
-            // Wait for both loops to complete with timeout
-            var tasks = new List<Task>();
+            // Wait for tasks to complete with timeout
+            var tasks = new List<Task>(2);
             if (_fastRefreshTask != null) tasks.Add(_fastRefreshTask);
             if (_slowRefreshTask != null) tasks.Add(_slowRefreshTask);
 
@@ -1784,81 +1784,76 @@ public partial class InsightsGrain : Grain, IInsightsGrain, IDisposable
     }
 
     /// <summary>
-    /// Fast refresh loop running on thread pool (1 second interval).
+    /// Fast refresh loop (1 second interval).
+    /// Uses PeriodicTimer for precise timing with clean async pattern.
     /// Builds page data for frequently updated pages: Overview, Orleans.
     /// </summary>
     private async Task FastRefreshLoopAsync(CancellationToken ct)
     {
         _logger.LogDebug("Fast refresh loop started");
 
-        while (!ct.IsCancellationRequested)
+        // PeriodicTimer provides precise timing with clean async pattern
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+
+        try
         {
-            try
+            while (await timer.WaitForNextTickAsync(ct))
             {
-                // Build all fast pages in parallel - DuckDB queries
-                var overviewTask = BuildOverviewPageDataForCacheAsync();
-                var orleansTask = BuildOrleansPageDataForCacheAsync();
+                try
+                {
+                    // Build all fast pages in parallel
+                    var overviewTask = BuildOverviewPageDataForCacheAsync();
+                    var orleansTask = BuildOrleansPageDataForCacheAsync();
 
-                await Task.WhenAll(overviewTask, orleansTask);
+                    await Task.WhenAll(overviewTask, orleansTask);
 
-                // Update page cache (volatile writes)
-                _refreshedOverview = await overviewTask;
-                _refreshedOrleans = await orleansTask;
+                    // Update page cache (volatile writes)
+                    _refreshedOverview = await overviewTask;
+                    _refreshedOrleans = await orleansTask;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogWarning(ex, "Fast refresh loop iteration failed");
+                }
             }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                break;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Fast refresh loop iteration failed");
-            }
-
-            try
-            {
-                await Task.Delay(1000, ct);
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                break;
-            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected during shutdown
         }
 
         _logger.LogDebug("Fast refresh loop stopped");
     }
 
     /// <summary>
-    /// Slow refresh loop running on thread pool (5 second interval).
+    /// Slow refresh loop (5 second interval).
+    /// Uses PeriodicTimer for precise timing with clean async pattern.
     /// Builds page data for less frequently updated pages: Insights.
     /// </summary>
     private async Task SlowRefreshLoopAsync(CancellationToken ct)
     {
         _logger.LogDebug("Slow refresh loop started");
 
-        while (!ct.IsCancellationRequested)
-        {
-            try
-            {
-                // Build insights page data
-                _refreshedInsights = await BuildInsightsPageDataForCacheAsync();
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                break;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Slow refresh loop iteration failed");
-            }
+        // PeriodicTimer provides precise timing with clean async pattern
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
 
-            try
+        try
+        {
+            while (await timer.WaitForNextTickAsync(ct))
             {
-                await Task.Delay(5000, ct);
+                try
+                {
+                    _refreshedInsights = await BuildInsightsPageDataForCacheAsync();
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogWarning(ex, "Slow refresh loop iteration failed");
+                }
             }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                break;
-            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected during shutdown
         }
 
         _logger.LogDebug("Slow refresh loop stopped");
