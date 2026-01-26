@@ -24,11 +24,6 @@ public sealed class DashboardSubscription : IDisposable
     public IDashboardObserver Reference { get; private set; } = default!;
 
     /// <summary>
-    /// Gets the set of pages this subscription is subscribed to.
-    /// </summary>
-    public IReadOnlySet<string> SubscribedPages => _subscribedPages;
-
-    /// <summary>
     /// Sets the grain object reference for this observer.
     /// </summary>
     public void SetReference(IDashboardObserver reference) => Reference = reference;
@@ -42,11 +37,6 @@ public sealed class DashboardSubscription : IDisposable
     /// Removes a page subscription.
     /// </summary>
     public void RemovePage(string page) => _subscribedPages.Remove(page);
-
-    /// <summary>
-    /// Checks if this subscription is subscribed to a specific page.
-    /// </summary>
-    public bool IsSubscribedToPage(string page) => _subscribedPages.Contains(page);
 
     /// <summary>
     /// Gets the underlying observer instance.

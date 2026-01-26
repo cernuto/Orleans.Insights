@@ -196,40 +196,6 @@ public class InsightsOptions
     // How long to retain historical data (default: 1 hour)
     public TimeSpan RetentionPeriod { get; set; }
 
-    // === Dashboard Updates ===
-    // Fast broadcast interval for Overview/Orleans pages (default: 1 second)
-    public TimeSpan BroadcastInterval { get; set; }
-
-    // Slow broadcast interval for Insights page (default: 5 seconds)
-    public TimeSpan SlowBroadcastInterval { get; set; }
-
-    // Cache TTL for page data to reduce repeated queries (default: 500ms)
-    public TimeSpan PageCacheTtl { get; set; }
-
-    // === DuckDB Buffering ===
-    // Number of records to buffer before flushing to DuckDB (default: 1000)
-    public int BatchFlushThreshold { get; set; }
-
-    // Maximum time to buffer records before flushing (default: 1 second)
-    public TimeSpan BatchFlushInterval { get; set; }
-
-    // Capacity of the bounded channel for metrics buffering (default: 10,000)
-    // When full, oldest items are dropped (backpressure handling)
-    public int ChannelCapacity { get; set; }
-
-    // === Memory Management ===
-    // Maximum grain types/methods to track before LRU eviction (default: 10,000)
-    public int MaxMetricsEntries { get; set; }
-
-    // How often to check for LRU eviction (default: 1 minute)
-    public TimeSpan EvictionCheckInterval { get; set; }
-
-    // Maximum metrics samples per grain type for rolling windows (default: 100)
-    public int MetricsSampleLimit { get; set; }
-
-    // Maximum method profile samples for time-series charts (default: 120)
-    public int MethodProfileSampleLimit { get; set; }
-
     // === Maintenance ===
     // How often to run maintenance tasks (default: 1 minute)
     public TimeSpan MaintenanceInterval { get; set; }
@@ -237,22 +203,20 @@ public class InsightsOptions
     // How often to run vacuum/checkpoint operations (default: 30 minutes)
     public TimeSpan VacuumInterval { get; set; }
 
-    // Database size threshold for warnings (default: 100 MB)
-    public long DatabaseSizeWarningBytes { get; set; }
+    // How often to log database metrics (default: 5 minutes)
+    public TimeSpan MetricsLogInterval { get; set; }
 
     // === Queries ===
     // Default duration for queries when not specified (default: 30 minutes)
     public TimeSpan DefaultQueryDuration { get; set; }
 
-    // Default bucket size for time-series aggregations (default: 60 seconds)
-    public int DefaultBucketSeconds { get; set; }
+    // === DuckDB Buffering ===
+    // Number of records to buffer before flushing to DuckDB (default: 1000)
+    public int BatchFlushThreshold { get; set; }
 
-    // Maximum rows to return from custom queries (default: 10,000)
-    public int MaxQueryResults { get; set; }
-
-    // === Security ===
-    // Require authentication for dashboard (default: false)
-    public bool RequireAuthentication { get; set; }
+    // Capacity of the bounded channel for metrics buffering (default: 10,000)
+    // When full, oldest items are dropped (backpressure handling)
+    public int ChannelCapacity { get; set; }
 }
 ```
 

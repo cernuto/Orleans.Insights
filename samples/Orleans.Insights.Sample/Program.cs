@@ -29,7 +29,6 @@ builder.UseOrleans(siloBuilder =>
         .AddOrleansInsights(options =>
         {
             options.RetentionPeriod = TimeSpan.FromHours(1);
-            options.BroadcastInterval = TimeSpan.FromSeconds(1);
         });
 });
 

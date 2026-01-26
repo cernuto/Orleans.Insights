@@ -239,18 +239,6 @@ public sealed class GrainMethodProfiler : IGrainMethodProfiler, ILifecyclePartic
         }
     }
 
-    private static string FormatTraceSamples(ReadOnlySpan<MethodTraceEntry> entries)
-    {
-        var sampleCount = Math.Min(5, entries.Length);
-        var samples = new string[sampleCount];
-        for (var i = 0; i < sampleCount; i++)
-        {
-            ref readonly var e = ref entries[i];
-            samples[i] = $"{e.GrainType}.{e.Method}={e.Count}, elapsed={e.ElapsedTime:F2}ms";
-        }
-        return string.Join(", ", samples);
-    }
-
     public void Dispose()
     {
         if (_disposed) return;
