@@ -336,8 +336,9 @@ public sealed class DashboardBroadcastGrain : Grain, IDashboardBroadcastGrain
             return Task.CompletedTask;
         }
 
-        // Clear expired from ObserverManager
+        // Clear expired from ObserverManager and synchronize with our tracking dictionaries
         _observerManager!.ClearExpired();
+        SynchronizeExpiredObservers();
 
         // Cleanup expired grace periods
         if (_gracePeriodEnabled)
@@ -362,6 +363,35 @@ public sealed class DashboardBroadcastGrain : Grain, IDashboardBroadcastGrain
         }
 
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Synchronizes our tracking dictionaries with ObserverManager after ClearExpired().
+    /// Removes any connections whose observers have been marked as dead by health tracking.
+    /// </summary>
+    private void SynchronizeExpiredObservers()
+    {
+        // Use health tracker's dead observers list - these need cleanup from all tracking structures
+        var deadObservers = _healthTracker!.GetDeadObservers();
+        if (deadObservers.Count > 0)
+        {
+            foreach (var connectionId in deadObservers)
+            {
+                if (_liveObservers.TryGetValue(connectionId, out var observer))
+                {
+                    _liveObservers.Remove(connectionId);
+                    _observerToConnectionId.Remove(observer);
+                    _connectionToPages.Remove(connectionId);
+                    _observerManager!.Unsubscribe(observer);
+
+                    _logger.LogDebug("Cleaned up expired/dead observer for connection {ConnectionId}", connectionId);
+                }
+            }
+
+            _logger.LogInformation(
+                "Synchronized {Count} expired observers. Total observers: {Total}",
+                deadObservers.Count, _liveObservers.Count);
+        }
     }
 
     #endregion

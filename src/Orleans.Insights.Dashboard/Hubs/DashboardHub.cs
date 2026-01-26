@@ -209,6 +209,26 @@ public sealed class DashboardHub : Hub
         _logger.LogDebug("Client {ConnectionId} unsubscribed from: {Page}", Context.ConnectionId, normalizedPage);
     }
 
+    /// <summary>
+    /// Heartbeat to refresh the observer subscription and prevent expiration.
+    /// Clients should call this periodically (recommended: every 30 seconds).
+    /// </summary>
+    public async Task Heartbeat()
+    {
+        var subscription = GetSubscription();
+        if (subscription is null)
+        {
+            _logger.LogWarning("Heartbeat: No subscription found for connection {ConnectionId}", Context.ConnectionId);
+            return;
+        }
+
+        // Touch the subscription in the broadcast grain to refresh expiration
+        var grain = _clusterClient.GetGrain<IDashboardBroadcastGrain>(0);
+        await grain.Touch(Context.ConnectionId, subscription.Reference);
+
+        _logger.LogDebug("Heartbeat received from connection {ConnectionId}", Context.ConnectionId);
+    }
+
     #endregion
 
     #region Data Fetch Methods
