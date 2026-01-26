@@ -8,7 +8,7 @@
 
     <!-- Package metadata -->
     <PackageId>Orleans.Insights.Dashboard</PackageId>
-    <Version>1.0.0</Version>
+    <Version>1.1.0</Version>
     <Authors>Orleans.Insights Contributors</Authors>
     <Description>Server-side components for Orleans.Insights dashboard including SignalR hub and OpenTelemetry metrics listener.</Description>
     <PackageTags>orleans;dashboard;monitoring;signalr;blazor</PackageTags>

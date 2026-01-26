@@ -2,6 +2,9 @@
 
 A modern, high-performance dashboard for Microsoft Orleans with DuckDB-powered time-series analytics.
 
+![Method Profiling](MethodProfiling.png)
+*Real-time method profiling with latency, throughput, and error tracking*
+
 ## Features
 
 - **Real-time monitoring** - SignalR-based push updates for live cluster visibility
@@ -182,10 +185,29 @@ Sample application demonstrating Orleans.Insights integration.
 
 ## Dashboard Pages
 
-- **Overview** - High-level cluster summary with silo status
-- **Orleans** - Detailed grain monitoring with method profiling
-- **Insights** - Trend analysis and anomaly detection
-- **Settings** - Configuration and diagnostics
+### Orleans Page
+Detailed grain monitoring with interactive method profiling:
+
+![Method Profiling](MethodProfiling.png)
+
+- Grain list with system/observer/dashboard badges for filtering
+- Per-grain detail panel showing activations, error rate, RPS, and average latency
+- Interactive method profiling chart with requests/sec, failed requests, and latency trends
+- Per-silo breakdown for multi-silo clusters
+
+### Insights Page
+Trend analysis, anomaly detection, and performance comparisons:
+
+![Insights](Insights.png)
+
+- **Slowest Grain Types** - Top grains by average latency with request counts
+- **Busiest Grain Types** - Top grains by requests per second with error rates
+- **Slowest Methods** - Individual method latency analysis
+- **Most Failing Methods** - Methods with highest exception counts and error rates
+
+### Other Pages
+- **Overview** - High-level cluster summary with silo status cards
+- **Settings** - Configuration, diagnostics, and database statistics
 
 ## Configuration Options
 

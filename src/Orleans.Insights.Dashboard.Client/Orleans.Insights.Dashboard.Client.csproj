@@ -11,7 +11,7 @@
 
     <!-- Package metadata -->
     <PackageId>Orleans.Insights.Dashboard.Client</PackageId>
-    <Version>1.0.0</Version>
+    <Version>1.1.0</Version>
     <Authors>Orleans.Insights Contributors</Authors>
     <Description>Blazor WebAssembly client for Orleans.Insights dashboard with real-time cluster monitoring UI.</Description>
     <PackageTags>orleans;dashboard;monitoring;blazor;wasm</PackageTags>
