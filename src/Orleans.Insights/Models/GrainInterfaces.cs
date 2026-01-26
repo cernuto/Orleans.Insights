@@ -288,21 +288,72 @@ public interface IInsightsGrain :
 }
 
 /// <summary>
+/// Orleans grain observer for dashboard real-time updates.
+/// Clients implement this interface to receive push notifications from the dashboard broadcast grain.
+/// Uses [OneWay] for fire-and-forget semantics - the grain doesn't wait for delivery confirmation.
+/// </summary>
+public interface IDashboardObserver : IGrainObserver
+{
+    /// <summary>Push Overview page data to the observer.</summary>
+    [OneWay]
+    Task OnOverviewData(OverviewPageData data);
+
+    /// <summary>Push Orleans page data to the observer.</summary>
+    [OneWay]
+    Task OnOrleansData(OrleansPageData data);
+
+    /// <summary>Push Insights page data to the observer.</summary>
+    [OneWay]
+    Task OnInsightsData(InsightsPageData data);
+}
+
+/// <summary>
 /// Grain interface for broadcasting dashboard data changes to SignalR clients.
 /// Implemented in the dashboard host, called from InsightsGrain when data changes.
-/// Uses [OneWay] for fire-and-forget calls since broadcast results don't need to be awaited.
+/// Uses Orleans observer pattern for push-based notifications with health tracking.
 /// </summary>
 public interface IDashboardBroadcastGrain : IGrainWithIntegerKey
 {
-    /// <summary>Broadcast Overview page data to subscribed clients.</summary>
+    /// <summary>Broadcast Overview page data to subscribed observers.</summary>
     [OneWay]
     Task BroadcastOverviewData(OverviewPageData data);
 
-    /// <summary>Broadcast Orleans page data to subscribed clients.</summary>
+    /// <summary>Broadcast Orleans page data to subscribed observers.</summary>
     [OneWay]
     Task BroadcastOrleansData(OrleansPageData data);
 
-    /// <summary>Broadcast Insights page data to subscribed clients.</summary>
+    /// <summary>Broadcast Insights page data to subscribed observers.</summary>
     [OneWay]
     Task BroadcastInsightsData(InsightsPageData data);
+
+    /// <summary>
+    /// Subscribe a connection's observer to a specific page.
+    /// The observer will receive pushed updates when that page's data changes.
+    /// </summary>
+    /// <param name="connectionId">The SignalR connection ID.</param>
+    /// <param name="page">The page to subscribe to (overview, orleans, insights).</param>
+    /// <param name="observer">The observer reference created via CreateObjectReference.</param>
+    Task Subscribe(string connectionId, string page, IDashboardObserver observer);
+
+    /// <summary>
+    /// Unsubscribe a connection from a specific page.
+    /// </summary>
+    /// <param name="connectionId">The SignalR connection ID.</param>
+    /// <param name="page">The page to unsubscribe from.</param>
+    Task Unsubscribe(string connectionId, string page);
+
+    /// <summary>
+    /// Unsubscribe a connection from all pages.
+    /// Called when a client disconnects.
+    /// </summary>
+    /// <param name="connectionId">The SignalR connection ID.</param>
+    Task UnsubscribeAll(string connectionId);
+
+    /// <summary>
+    /// Refresh an observer's subscription (heartbeat).
+    /// Prevents the subscription from expiring due to inactivity.
+    /// </summary>
+    /// <param name="connectionId">The SignalR connection ID.</param>
+    /// <param name="observer">The observer reference.</param>
+    Task Touch(string connectionId, IDashboardObserver observer);
 }

@@ -28,12 +28,25 @@ namespace Orleans.Insights.Dashboard;
 public static class DashboardExtensions
 {
     /// <summary>
-    /// Adds Orleans.Insights dashboard services including SignalR.
+    /// Adds Orleans.Insights dashboard services including SignalR and observer options.
     /// </summary>
     /// <param name="services">The service collection.</param>
+    /// <param name="configureOptions">Optional action to configure observer options.</param>
     /// <returns>The service collection for chaining.</returns>
-    public static IServiceCollection AddOrleansInsightsDashboard(this IServiceCollection services)
+    public static IServiceCollection AddOrleansInsightsDashboard(
+        this IServiceCollection services,
+        Action<DashboardObserverOptions>? configureOptions = null)
     {
+        // Configure observer options
+        if (configureOptions != null)
+        {
+            services.Configure(configureOptions);
+        }
+        else
+        {
+            services.Configure<DashboardObserverOptions>(_ => { });
+        }
+
         // Add SignalR with MessagePack for better performance (optional, falls back to JSON)
         services.AddSignalR(options =>
         {
